@@ -164,3 +164,115 @@ Each case asserts what its row says. Where a row leaves something open, I chose 
   - `make lint` runs `buf breaking --against '.git#branch=main'` whenever a `main` branch with `buf.yaml` exists, including on `main` itself, where it compares the working tree with the last commit.
   - `ci.yml` creates `.env` from `.env.example` before running compose commands, and `e2e.yml` runs `make env` before `make build`.
 - **Diagram:** no change.
+
+## Sprint A
+
+### D-014 · 2026-11-25 · G3 · "Latest at build" pins for sprint A
+- **Prompted by:** spec §2.5 lists `modernc.org/sqlite` as "latest at build"; §15.11 needs a Go builder image; CLAUDE.md forbids `latest`.
+- **Evidence:** `proxy.golang.org/modernc.org/sqlite/@latest` gave v1.63.0 (published 2026-11-22). `docker manifest inspect` found `golang:1.26.11-bookworm` and `gcr.io/distroless/static-debian12:nonroot`.
+- **Decision:**
+  - `modernc.org/sqlite` v1.63.0.
+  - Builder `golang:1.26.11-bookworm`. Debian 12 is fixed, and it matches `go 1.26.11` in `go.mod` (D-003).
+  - Runtime `gcr.io/distroless/static-debian12:nonroot`, exactly as spec §2.3 writes it.
+  - Local images are tagged `adl/datacore:0.1.0` and `adl/adapter:0.1.0`, never `latest`.
+- **Diagram:** no change.
+
+### D-015 · 2026-11-25 · §8.1 / §15.7 · Kafka broker details
+- **Prompted by:**
+  - §8.1 asks for a fixed `CLUSTER_ID` and says to check the environment against the image documentation;
+  - §15.7 requires a writable volume.
+- **Evidence:** `docker image inspect apache/kafka:4.3.2` shows user `appuser` (uid 1000) and a declared volume `/var/lib/kafka/data` owned by `appuser`. `kafka-storage.sh random-uuid` gave `97agkXLTQ7GFSS3sN2JpZA`.
+- **Decision:**
+  - `CLUSTER_ID: 97agkXLTQ7GFSS3sN2JpZA`, committed.
+  - `KAFKA_LOG_DIRS=/var/lib/kafka/data`, with volume `kafka-data` mounted there. The volume inherits the owner, so no chown is needed.
+  - Added `KAFKA_MIN_INSYNC_REPLICAS=1` (spec §8.1 "min.insync.replicas 1") and `KAFKA_DEFAULT_REPLICATION_FACTOR=1`.
+  - `kafka-init` runs `infra/scripts/create-topics.sh` with `KAFKA_HEAP_OPTS=-Xmx256m`.
+  - Verified: `kafka-topics.sh --describe` matches §8.2, and a second run exits 0.
+- **Diagram:** no change.
+
+### D-016 · 2026-11-25 · §15.4 / §15.6 · Dragonfly flags and health check
+- **Prompted by:**
+  - the image's own health check (`/usr/local/bin/healthcheck.sh`) is invisible to `adlctl wait`, which only reads compose health checks;
+  - the startup log showed an outbound version check (`version_monitor.cc`).
+- **Decision:**
+  - Command `dragonfly --logtostderr --proactor_threads=1 --maxmemory=256mb --cache_mode=true --version_check=false`.
+  - Compose health check `redis-cli -p 6379 ping | grep -q PONG`, with the §15.6 timings (`redis-cli` ships in the image).
+  - No volume: it is a cache.
+- **Diagram:** no change.
+
+### D-017 · 2026-11-25 · §7.2 · datacore storage design
+- **Prompted by:** §7.2 leaves the schema to the implementer.
+- **Decision:**
+  - **Tables:**
+    - `entities(type, id, state BLOB, prev_state BLOB, version, changed_at_ms)`, holding the current and previous state as deterministic Protobuf;
+    - `outbox(seq AUTOINCREMENT, topic, key, value, created_at_ms)`;
+    - `meta(seed_complete)`.
+  - **One SQLite connection** (`SetMaxOpenConns(1)`): writes are serialised, so outbox seq order equals commit order and the relay can delete with `seq <= max`.
+  - **`Apply`** is detached from cancellation, so a change that has started always commits or rolls back as a whole (§7.11).
+  - **`changed_at`** is truncated to milliseconds before it is stored.
+  - **Seed:** batches of 500. The seed only inserts missing ids, so an interrupted seed resumes, and `seed_complete` marks the end.
+- **Evidence:** unit tests in `datacore/internal/store`. A live restart kept versions (v2 then v3 after the restart) and did not seed again.
+- **Diagram:** no change.
+
+### D-018 · 2026-11-25 · G1 · The admin API rejects ids that are never created
+- **Prompted by:** §5.4 says LT-9999 and LT-8000 to LT-8999 are "never created by anyone", but §7.8 does not list that check.
+- **Decision:** `UpsertAsset` returns INVALID_ARGUMENT for LT-9999 and LT-8000 to LT-8999. G1 favours keeping the §16 tests meaningful: A08, E01 and D02 rely on those ids never existing.
+- **Diagram:** no change.
+
+### D-019 · 2026-11-25 · §17.1 · Extra Go packages
+- **Prompted by:** §17.1 gives `datacore/internal/{store,outbox,generator,chaos,grpcapi}` and `adapter/internal/{consumer,fetcher,cache,publisher}` as examples.
+- **Decision:**
+  - **`datacore/internal/model`:** ids, pools and request validation, shared by `store`, `generator` and `grpcapi`.
+  - **`adapter/internal/handler`:** the service layer between the consumer (transport) and the fetcher, cache and publisher.
+  - **`adapter/internal/contract`:** the §6.7 rules, used by both `handler` and `fetcher`. Without it they would form an import cycle.
+  - **No shared copy of the rules:** Go's `internal/` rule stops `adapter/` from importing `datacore/internal/model`. Each service keeps its own copy of the id patterns, as two independent services would.
+- **Diagram:** no change.
+
+### D-020 · 2026-11-25 · §7.6 · Generator details
+- **Prompted by:** §7.6 gives the mix but not every detail.
+- **Decision:**
+  - Every change picks a value different from the current one.
+  - "Reassign" draws uniformly from the seeded users plus "unassigned".
+  - "OS" stays within the asset's pool.
+  - "Group rename" uses a fixed pool of 16 names: the 8 seed names plus Legal, Compras, Calidad, Logística, Innovación, Datos, Seguridad and Comunicación.
+  - The rate loop never owes more than one second of changes, so a slow moment does not turn into a flood.
+  - The random source is seeded from the clock. Only the seed dataset must be deterministic (§5.3).
+- **Note:** the generator also changes LT-0042, U-0117 and G-03, as §5.4 allows. The sprint E walkthrough must not assume the seed values still hold (audit F-10).
+- **Diagram:** no change.
+
+### D-021 · 2026-11-25 · §6.5 · Stats semantics
+- **Decision:**
+  - `changes_applied` counts every §7.3 change since start (upserts, generator, Burst), not the seed.
+  - `triggers_published` counts real triggers acknowledged since start, seed included, chaos extras excluded.
+  - `get_calls` counts every `Get*` call, failed ones included (§6.5).
+  - All three reset on restart ("since start").
+  - `outbox_pending` and the entity counts come from the database.
+- **Diagram:** no change.
+
+### D-022 · 2026-11-25 · §9.2 / §9.4 / §9.5 / §9.8 · Adapter delivery details
+- **Prompted by:** the spec leaves these open; audit findings F-01 to F-05 and F-09 of sprint A.
+- **Decision:**
+  - **Consumer:** one franz-go client with `DisableAutoCommit`, `BlockRebalanceOnPoll`, reset to start, `SessionTimeout` 10 s (faster recovery for E02), idempotent producer with `acks=all` and a 5 ms linger.
+  - **Commit:** after each batch, every partition commits the end of its acknowledged prefix.
+  - **A failed ack outside shutdown:** `Run` returns `ErrIncomplete` and the process exits, so the restarted adapter handles the record again, in order, from the last committed offset. This means offsets are never committed past an unhandled record (F-02).
+  - **Failed produces are not re-sent by the publisher.** franz-go already retries retriable errors, and a later re-send could place an older version after a newer one on a compacted topic (F-03).
+  - **Shutdown:** after SIGTERM the batch in progress has 7 s, below compose's 10 s stop timeout. Unfinished records are not committed. The client closes with `CloseAllowingRebalance`, so it leaves the group instead of hanging (F-01). `Run` also always calls `AllowRebalance` on return.
+  - **Codes outside the §9.4 list** (for example PERMISSION_DENIED) are transient: "losing data is worse than a visible stall".
+  - **Readiness** needs at least one assigned partition, and drops on revoke or loss (F-04).
+  - **"Retry escalation"** is logged once, when the fast retries are used up (F-05).
+  - **gRPC reconnect backoff** is 100 ms to `RETRY_MAX_MS` instead of grpc-go's 120 s default (F-09).
+- **Evidence:** consumer and publisher unit tests. Live: a graceful `docker compose stop adapter` took 0.25 s with exit 0, versus 10 s and exit 137 before the fix.
+- **Diagram:** no change.
+
+### D-023 · 2026-11-25 · D-007 · Repository and build context
+- **Decision:**
+  - `host-prep` moved to `infra/scripts/host-prep.sh`, next to `create-topics.sh`, as D-007 allowed.
+  - The Go images build from the repository root, because there is one module (§17.1).
+  - `.dockerignore` excludes `.git`, `specs`, `acceptance`, `processor`, `explorer`, `web`, `infra` and Markdown. A later image that builds from the root context and needs one of those must adjust it.
+  - `make build` depends on `make env`, so `.env` exists before compose interpolates it (sprint 0 audit F-07).
+- **Diagram:** no change.
+
+### D-024 · 2026-11-25 · §7.8 · Upsert validation does not enforce the pools
+- **Prompted by:** §5.1 says `os` and `site` come from pools, but §7.8 lists only the id pattern, kind/prefix, required fields and references.
+- **Decision:** the admin API checks what §7.8 lists. `os` and `site` must be non-empty, but they are not restricted to the pools. Tests and `adlctl move` use pool values anyway.
+- **Diagram:** no change.
