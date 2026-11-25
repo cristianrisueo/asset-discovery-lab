@@ -1,0 +1,20 @@
+# Build runner
+logs/
+
+# Local configuration (lab credentials live in .env, created from .env.example)
+.env
+
+# Build outputs
+bin/
+dist/
+target/
+build/
+
+# Dependencies
+node_modules/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
