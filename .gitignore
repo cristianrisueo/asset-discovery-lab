@@ -18,3 +18,6 @@ node_modules/
 .idea/
 .vscode/
 *.swp
+# Coverage and test artefacts
+*.out
+coverage.*

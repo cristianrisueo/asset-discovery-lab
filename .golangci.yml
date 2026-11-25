@@ -1,0 +1,24 @@
+# golangci-lint v2 configuration (pinned in the Makefile and CI).
+version: "2"
+
+run:
+  # The acceptance suite is only compiled with its build tag; lint it too.
+  build-tags:
+    - acceptance
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - misspell
+    - unconvert
+  exclusions:
+    # Generated code (gen/go) carries the "Code generated ... DO NOT EDIT" header.
+    generated: strict
+
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    generated: strict

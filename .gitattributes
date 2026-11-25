@@ -1,0 +1,7 @@
+# Normalise line endings; shell scripts must stay LF inside Linux containers.
+* text=auto eol=lf
+*.sh text eol=lf
+
+# Generated code is committed (spec §6.1) and marked as generated (spec §17.2).
+gen/go/** linguist-generated=true
+processor/src/generated/** linguist-generated=true

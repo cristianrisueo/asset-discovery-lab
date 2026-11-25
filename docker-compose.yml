@@ -1,0 +1,15 @@
+# asset-discovery-lab local stack (spec §15).
+# The file grows sprint by sprint: it only contains services that are already
+# built, each in its final profile (spec §15.2, sprints plan §3.6).
+name: adl
+
+services: {}
+
+networks:
+  adl:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          ip_range: 172.30.0.128/25
+          gateway: 172.30.0.1
