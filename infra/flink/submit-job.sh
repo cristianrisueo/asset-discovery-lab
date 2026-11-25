@@ -2,8 +2,9 @@
 # One-shot submitter of the adl-processor job (spec §10.11), run by the
 # flink-job container. It talks to the Flink REST API only.
 #
-#   1. wait for the JobManager and a TaskManager with free slots;
-#   2. exit 0 when the job already runs (idempotent);
+#   1. wait for the JobManager;
+#   2. exit 0 when the job already runs (idempotent), and only then wait
+#      for enough free TaskManager slots;
 #   3. restore from the newest savepoint or retained checkpoint, if any;
 #   4. reuse the label run id on restore, or write a new one on a fresh start;
 #   5. upload and run the jar;
@@ -29,26 +30,45 @@ info() { log INFO "$1"; }
 fail() { log ERROR "$1"; exit 1; }
 
 rest() { curl -sS --max-time 30 "$@"; }
+# Upload and run get a long timeout: /run executes main() on the JobManager.
+rest_slow() { curl -sS --max-time 300 "$@"; }
 
-# --- 1. JobManager and TaskManager ------------------------------------------
+# Prints the GET response body, or nothing when the call fails.
+get_json() { rest -f "${FLINK_REST}$1" 2>/dev/null || true; }
+
+# --- 1a. JobManager ---------------------------------------------------------
 deadline=$(( $(date +%s) + WAIT_TIMEOUT_S ))
 until rest -f "${FLINK_REST}/overview" > /dev/null 2>&1; do
   [ "$(date +%s)" -lt "$deadline" ] || fail "JobManager REST API not reachable at ${FLINK_REST} within ${WAIT_TIMEOUT_S}s"
   sleep 2
 done
-until [ "$(rest -f "${FLINK_REST}/taskmanagers" | jq '[.taskmanagers[] | select(.freeSlots > 0)] | length')" -gt 0 ]; do
-  [ "$(date +%s)" -lt "$deadline" ] || fail "no TaskManager with free slots within ${WAIT_TIMEOUT_S}s"
+
+# --- 2. Already submitted? (before the slot check: a running job holds the slots)
+# INITIALIZING precedes CREATED in Flink, so it also counts as present.
+until overview="$(get_json /jobs/overview)" && [ -n "$overview" ]; do
+  [ "$(date +%s)" -lt "$deadline" ] || fail "GET /jobs/overview kept failing for ${WAIT_TIMEOUT_S}s"
+  log WARN "GET /jobs/overview failed; retrying"
   sleep 2
 done
-info "JobManager and a TaskManager with free slots are available"
-
-# --- 2. Already submitted? --------------------------------------------------
-active="$(rest -f "${FLINK_REST}/jobs/overview" | jq -r --arg n "$JOB_NAME" \
-  '[.jobs[] | select(.name == $n and (.state == "CREATED" or .state == "RUNNING" or .state == "RESTARTING"))][0] | if . == null then "" else "\(.jid) \(.state)" end')"
+active="$(jq -r --arg n "$JOB_NAME" \
+  '[.jobs[] | select(.name == $n and (.state | IN("INITIALIZING", "CREATED", "RUNNING", "RESTARTING")))][0]
+   | if . == null then "" else "\(.jid) \(.state)" end' <<< "$overview")"
 if [ -n "$active" ]; then
   info "job ${JOB_NAME} is already present (${active}); nothing to submit"
   exit 0
 fi
+
+# --- 1b. Free slots for the whole job ---------------------------------------
+# The REST run handler uses parallelism 1 unless the request sets one, so the
+# submitter passes the cluster's parallelism.default (spec §10.9) explicitly.
+parallelism="$(get_json /jobmanager/config | jq -r '[.[] | select(.key == "parallelism.default")][0].value // "1"' 2>/dev/null || true)"
+[[ "$parallelism" =~ ^[1-9][0-9]*$ ]] || fail "cannot read parallelism.default from /jobmanager/config (got \"${parallelism}\")"
+until free="$(get_json /taskmanagers | jq '[.taskmanagers[].freeSlots] | add // 0' 2>/dev/null)" \
+    && [ -n "$free" ] && [ "$free" -ge "$parallelism" ]; do
+  [ "$(date +%s)" -lt "$deadline" ] || fail "fewer than ${parallelism} free TaskManager slots within ${WAIT_TIMEOUT_S}s (free: ${free:-unknown})"
+  sleep 2
+done
+info "JobManager ready with ${free} free slots; parallelism ${parallelism}"
 
 # --- 3. Restore point: the newest _metadata among savepoints and checkpoints --
 restore="$( {
@@ -93,7 +113,7 @@ args=(
 [ -n "${S3_ACCESS_KEY:-}" ] && args+=(--s3.access-key "$S3_ACCESS_KEY")
 [ -n "${S3_SECRET_KEY:-}" ] && args+=(--s3.secret-key "$S3_SECRET_KEY")
 
-upload="$(rest -H 'Expect:' -X POST -F "jarfile=@${JAR}" "${FLINK_REST}/jars/upload")" \
+upload="$(rest_slow -H 'Expect:' -X POST -F "jarfile=@${JAR}" "${FLINK_REST}/jars/upload")" \
   || fail "jar upload failed"
 jar_id="$(jq -r '.filename // empty' <<< "$upload")"
 [ -n "$jar_id" ] || fail "jar upload rejected: ${upload}"
@@ -103,9 +123,10 @@ info "uploaded ${JAR} as ${jar_id}"
 # One argument per line (no value contains a newline), then a JSON array.
 args_json="$(printf '%s\n' "${args[@]}" | jq -R . | jq -sc .)"
 body="$(jq -nc --arg entry "$ENTRY_CLASS" --arg sp "${restore:+file://${restore}}" --argjson args "$args_json" \
-  '{entryClass: $entry, programArgsList: $args, allowNonRestoredState: false}
+  --argjson parallelism "$parallelism" \
+  '{entryClass: $entry, programArgsList: $args, parallelism: $parallelism, allowNonRestoredState: false}
    + (if $sp == "" then {} else {savepointPath: $sp} end)')"
-run_resp="$(rest -X POST -H 'Content-Type: application/json' -d "$body" -w '\n%{http_code}' "${FLINK_REST}/jars/${jar_id}/run")" \
+run_resp="$(rest_slow -X POST -H 'Content-Type: application/json' -d "$body" -w '\n%{http_code}' "${FLINK_REST}/jars/${jar_id}/run")" \
   || fail "jar run request failed"
 run_code="${run_resp##*$'\n'}"
 run_body="${run_resp%$'\n'*}"
@@ -134,7 +155,15 @@ while :; do
 done
 
 # --- 7. Keep the newest savepoints ------------------------------------------
-find "${FLINK_DATA}/savepoints" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null \
+# Complete savepoints (with _metadata) are ranked by the mtime of _metadata;
+# incomplete directories (a failed stop-with-savepoint) are removed.
+for dir in "${FLINK_DATA}"/savepoints/*/; do
+  [ -d "$dir" ] || continue
+  if [ ! -f "${dir}_metadata" ]; then
+    rm -rf -- "$dir" && info "deleted incomplete savepoint ${dir%/}"
+  fi
+done
+{ find "${FLINK_DATA}/savepoints" -mindepth 2 -maxdepth 2 -name _metadata -printf '%T@ %h\n' 2>/dev/null || true; } \
   | sort -rn | tail -n "+$(( KEEP_SAVEPOINTS + 1 ))" | cut -d' ' -f2- \
   | while IFS= read -r old; do
       rm -rf -- "$old" && info "deleted old savepoint ${old}"

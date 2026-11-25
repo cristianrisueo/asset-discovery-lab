@@ -45,10 +45,11 @@ func (a *app) reconcile(ctx context.Context, args []string) error {
 }
 
 // lakeSkip reports whether the lake comparison must be skipped because the
-// stack runs without the lake: core-only mode (spec §15.2), where the lake
-// profile is not running and the job has no Iceberg branch. When the lake
-// profile runs, the lake is always compared, so a missing catalog still fails.
-// If docker compose cannot be read, the lake is compared.
+// stack was started without the lake: core-only mode (spec §15.2), where no
+// container of the lake profile exists and the job has no Iceberg branch. When
+// an iceberg-rest container exists in any state, the lake is compared, so a
+// crashed or stopped lake, or a missing catalog, still fails. If docker
+// compose cannot be read, the lake is compared.
 func (a *app) lakeSkip(ctx context.Context) (bool, string) {
 	root, err := a.cfg.ResolveRepoRoot()
 	if err != nil {
@@ -58,16 +59,17 @@ func (a *app) lakeSkip(ctx context.Context) (bool, string) {
 	if err != nil {
 		return false, ""
 	}
-	if lakeRunning(containers) {
+	if lakeCreated(containers) {
 		return false, ""
 	}
-	return true, "the lake profile is not running (core-only mode, make up-core); use make up for the full stack"
+	return true, "the stack has no lake (core-only mode, make up-core); use make up for the full stack"
 }
 
-// lakeRunning reports whether a container of the iceberg-rest service runs.
-func lakeRunning(containers []labkit.ContainerStatus) bool {
+// lakeCreated reports whether a container of the iceberg-rest service exists,
+// whatever its state.
+func lakeCreated(containers []labkit.ContainerStatus) bool {
 	for _, c := range containers {
-		if c.Service == labkit.CompIcebergREST && c.State == "running" {
+		if c.Service == labkit.CompIcebergREST {
 			return true
 		}
 	}

@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # The flink-job image (spec §10.11): Maven builds the shaded job jar, which
 # ships in a small image with bash, curl and jq. The submit script is
 # infra/flink/submit-job.sh, mounted by compose.

@@ -174,7 +174,7 @@ func TestWaitWithoutRepoRoot(t *testing.T) {
 	}
 }
 
-func TestLakeRunning(t *testing.T) {
+func TestLakeCreated(t *testing.T) {
 	cases := []struct {
 		name string
 		in   []labkit.ContainerStatus
@@ -182,12 +182,12 @@ func TestLakeRunning(t *testing.T) {
 	}{
 		{"no containers", nil, false},
 		{"core only", []labkit.ContainerStatus{{Service: "kafka", State: "running"}, {Service: "doris-fe", State: "running"}}, false},
-		{"lake stopped", []labkit.ContainerStatus{{Service: "iceberg-rest", State: "exited"}}, false},
+		{"lake crashed or stopped", []labkit.ContainerStatus{{Service: "iceberg-rest", State: "exited"}}, true},
 		{"lake running", []labkit.ContainerStatus{{Service: "kafka", State: "running"}, {Service: "iceberg-rest", State: "running"}}, true},
 	}
 	for _, c := range cases {
-		if got := lakeRunning(c.in); got != c.want {
-			t.Errorf("%s: lakeRunning = %v, want %v", c.name, got, c.want)
+		if got := lakeCreated(c.in); got != c.want {
+			t.Errorf("%s: lakeCreated = %v, want %v", c.name, got, c.want)
 		}
 	}
 }
