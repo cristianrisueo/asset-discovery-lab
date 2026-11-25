@@ -5,6 +5,8 @@ import io.github.cristianrisueo.adl.processor.decode.EntityDecoder;
 import io.github.cristianrisueo.adl.processor.decode.EntityDeserializer;
 import io.github.cristianrisueo.adl.processor.decode.Envelope;
 import io.github.cristianrisueo.adl.processor.gate.VersionGate;
+import io.github.cristianrisueo.adl.processor.lake.LakeCatalog;
+import io.github.cristianrisueo.adl.processor.lake.LakeRows;
 import io.github.cristianrisueo.adl.processor.sink.DlqSerializer;
 import io.github.cristianrisueo.adl.processor.sink.DorisRows;
 import io.github.cristianrisueo.adl.processor.sink.DorisSinks;
@@ -22,14 +24,18 @@ import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsIni
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.data.RowData;
+import org.apache.iceberg.flink.TableLoader;
+import org.apache.iceberg.flink.sink.FlinkSink;
 import org.apache.kafka.clients.consumer.OffsetResetStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * The adl-processor Flink job (spec §10.1). It reads the three {@code entities.*} topics, sends
- * malformed records to {@code dlq.processor}, drops stale and duplicate versions, and writes the
- * current state and the per-minute change counts to Doris with two-phase commit.
+ * malformed records to {@code dlq.processor}, drops stale and duplicate versions, writes the
+ * current state and the per-minute change counts to Doris with two-phase commit, and, unless {@code
+ * --iceberg.enabled=false}, appends every accepted asset version to the lake (spec §10.7).
  *
  * <p>Checkpointing, the state backend and the restart strategy come from the cluster configuration
  * (spec §10.9); the job does not override them.
@@ -50,12 +56,6 @@ public final class ProcessorJob {
 
   public static void main(String[] args) throws Exception {
     JobOptions o = JobOptions.parse(args);
-    if (o.icebergEnabled) {
-      // The lake branch (spec §10.7) is built in sprint C; until then only core-only mode runs.
-      throw new IllegalArgumentException(
-          "--iceberg.enabled=true needs the Iceberg branch, which this build does not contain yet;"
-              + " start the stack with make up-core (ICEBERG_ENABLED=false)");
-    }
     LOG.info(
         "starting {}: kafka={} group={} fenodes={} benodes={} label-run-id={} iceberg={}",
         JOB_NAME,
@@ -65,13 +65,18 @@ public final class ProcessorJob {
         o.dorisBenodes.isEmpty() ? "(redirect)" : o.dorisBenodes,
         o.labelRunId,
         o.icebergEnabled);
+    // main() runs on the JobManager (spec §10.12), which reaches the REST catalog.
+    TableLoader lake = o.icebergEnabled ? LakeCatalog.ensureTable(o) : null;
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-    build(env, o);
+    build(env, o, lake);
     env.execute(JOB_NAME);
   }
 
-  /** Builds the topology of spec §10.1 with the operator names and uids of spec §10.10. */
-  public static void build(StreamExecutionEnvironment env, JobOptions o) {
+  /**
+   * Builds the topology of spec §10.1 with the operator names and uids of spec §10.10. A null
+   * {@code lake} leaves the Iceberg branch out (core-only mode, {@code --iceberg.enabled=false}).
+   */
+  public static void build(StreamExecutionEnvironment env, JobOptions o, TableLoader lake) {
     KafkaSource<Envelope> source =
         KafkaSource.<Envelope>builder()
             .setBootstrapServers(o.kafkaBootstrap)
@@ -123,6 +128,30 @@ public final class ProcessorJob {
         .sinkTo(DorisSinks.forTable(o, DorisSinks.CHANGE_RATE))
         .name("DorisChangeRate")
         .uid("doris-sink-change-rate");
+
+    if (lake != null) {
+      lakeSink(accepted, lake);
+    }
+  }
+
+  /** Appends every accepted asset version to {@code inventory.asset_changes} (spec §10.7). */
+  private static void lakeSink(DataStream<Envelope> accepted, TableLoader lake) {
+    DataStream<RowData> rows =
+        accepted
+            .filter(new OfType(Envelope.ASSET))
+            .name("OnlyAssetChanges")
+            .uid("filter-asset-changes")
+            .map(new LakeRows())
+            .returns(LakeRows.TYPE_INFO)
+            .name("RowDataAssetChanges")
+            .uid("rowdata-asset-changes");
+    // Commits happen when a checkpoint completes, which makes the lake exactly-once.
+    FlinkSink.forRowData(rows)
+        .tableLoader(lake)
+        .uidPrefix("iceberg-sink")
+        .writeParallelism(1)
+        .append()
+        .name("IcebergAssetChanges");
   }
 
   private static void entitySink(
