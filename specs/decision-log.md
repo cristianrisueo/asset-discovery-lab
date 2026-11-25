@@ -276,3 +276,106 @@ Each case asserts what its row says. Where a row leaves something open, I chose 
 - **Prompted by:** §5.1 says `os` and `site` come from pools, but §7.8 lists only the id pattern, kind/prefix, required fields and references.
 - **Decision:** the admin API checks what §7.8 lists. `os` and `site` must be non-empty, but they are not restricted to the pools. Tests and `adlctl move` use pool values anyway.
 - **Diagram:** no change.
+
+## Sprint B
+
+### D-025 · 2026-11-25 · G3 · "Latest at build" pins for sprint B
+- **Prompted by:** spec §2.2–§2.4 ("Maven 3.9.x latest at build", "mysql:8.4" and plugins without versions); CLAUDE.md: pin exact versions.
+- **Evidence:** `repo1.maven.org/maven2/<artifact>/maven-metadata.xml` and the Docker Hub tags API, on 2026-11-25. The spec's fixed versions all resolve: `flink-connector-kafka:5.0.0-2.1`, `flink-doris-connector-2.1:26.3.0` and `protobuf-java:4.36.2` (D-004).
+- **Decision:**
+
+  | Item | Version | Note |
+  |---|---|---|
+  | Maven builder | `maven:3.9.16-eclipse-temurin-17` | Newest 3.9 / Temurin 17 tag. Used by `processor/Dockerfile` and `make test lint` |
+  | mysql client | `mysql:8.4.13` | Newest 8.4 patch (`doris-init`) |
+  | `maven-compiler-plugin` | 3.16.0 | Newest non-beta |
+  | `maven-surefire-plugin` | 3.6.1 | |
+  | `maven-shade-plugin` | 3.6.2 | |
+  | `build-helper-maven-plugin` | 3.8.0 | |
+  | `spotless-maven-plugin` | 3.12.0 | |
+  | `google-java-format` | **1.28.0** | Newer releases (1.36+, 2.0) are compiled for Java 21. Spotless 3.12 also refuses anything above 1.28.0 on JDK 17 ("You are running Spotless on JVM 17, which limits you to google-java-format 1.28.0"). The processor builds on Java 17 (§2.2) |
+  | `jackson-databind` | 2.23.0 | JSON rows |
+  | JUnit | 5.14.4 (BOM) | JUnit 6.1.3 clashed with the JUnit 5.11 vintage engine that `flink-test-utils` 2.1.3 pulls in, and surefire refused to run. The 5.x BOM aligns every JUnit artifact |
+  | Flink test utilities | `flink-test-utils` and the `flink-runtime` test-jar, 2.1.3 | In 2.1 the operator test harnesses live in the `flink-runtime` test-jar |
+  | Submitter base | `alpine:3.24.4` (D-006) with `bash curl jq coreutils findutils` | apk packages come from that pinned release |
+
+- **Transitive versions worth knowing:** `kafka-clients` 4.2.0, from the Kafka connector.
+- **Diagram:** no change.
+
+### D-026 · 2026-11-25 · §3 R2 / §11.1 / §11.2 · Doris entrypoints and configuration
+- **Prompted by:** R2 says to read the 4.1.5 entrypoints before writing compose.
+- **Evidence:**
+  - **FE:** `init_fe.sh` supports election mode (`FE_SERVERS` and `FE_ID`). It appends `priority_networks = <ip>/24` to `fe.conf` on first start.
+  - **BE:** `entry_point.sh` takes election mode (`FE_SERVERS` and `BE_ADDR`). It runs `init_be.sh`, which appends `priority_networks` and registers the BE itself with `ALTER SYSTEM ADD BACKEND`. `init_be.sh` exports `SKIP_CHECK_ULIMIT=true` before `start_be.sh`; that is the image's own behaviour, not something this repository turns off.
+  - The default `fe.conf` sets `-Xmx8192m -Xms8192m`, which would be OOM-killed in a 1792 MiB container. The default `be.conf` sets BE JVM `-Xmx2048m`.
+  - Both images ship `curl` and the `mysql` client.
+  - `arrow_flight_sql_port` is already 8070 (FE) and 8050 (BE) in the defaults.
+- **Decision:**
+  - Election mode, exactly as §11.1 says.
+  - `infra/doris/fe.Dockerfile` and `be.Dockerfile` edit the default files with sed: FE heap 1280m/1280m, BE JVM `-Xmx512m`, both Flight SQL ports set explicitly, and `mem_limit = 2048M`.
+  - The BE log confirms the limit was accepted: "Mem Limit: 2.00 GB, origin config value: 2048M". `SHOW BACKENDS` shows `172.30.0.3 Alive=true`.
+  - FE health check: `/api/bootstrap` must return `"code":0`. HTTP 200 alone is not enough.
+- **Diagram:** no change.
+
+### D-027 · 2026-11-25 · G1 · Doris init script
+- **Decision:** `infra/scripts/doris-init.sh <sql-file>` runs in the `mysql:8.4.13` container:
+  - it waits until a `SHOW BACKENDS` row has `Alive=true`, finding the Host and Alive columns by header name;
+  - it replaces every upper-case `<NAME>` placeholder with the environment variable `NAME`, and fails if one has no value;
+  - it runs the file and fails on the first SQL error.
+
+  Sprint C reuses it for `init-lake.sql`. The SQL itself is §11.3–§11.5 and §11.7 verbatim; `groups` needed no backticks (R15).
+- **Diagram:** no change.
+
+### D-028 · 2026-11-25 · §10 / R11 / R17 · Processor design
+- **Decision:**
+  - **Envelope:** a Flink POJO with the decoded entity fields in plain columns. It never holds Protobuf messages, so no Kryo or Protobuf serializer is involved.
+  - **Decoding:** it happens in the Kafka deserializer, which never throws (§10.2, §16.2). The `DecodeValidate` operator only routes invalid envelopes to the DLQ side output.
+  - **DLQ reasons:**
+    - an unparseable value is `DECODE_ERROR`;
+    - a §6.7 rule break or a key that differs from the id is `VALIDATION_ERROR`;
+    - a null value parses as an empty message and fails validation.
+  - **Flink operators:** every operator has a uid, not only the stateful ones in §10.10. The filter and JSON mappers are `Only<table>`, `Json<table>`, `EntityType` and `ChangeRateJson`.
+  - **Shading:** `flink-connector-base` is `provided`, because `flink-dist` 2.1.3 already bundles it. The Doris connector jar bundles `org/slf4j`, which the shade step drops: Flink loads slf4j parent-first. No protobuf relocation was needed (R11).
+  - **Change-rate bounds:** written as `yyyy-MM-dd HH:mm:ss`, the exact form of Appendix A item 7. Entity datetimes are `yyyy-MM-dd HH:mm:ss.SSS` (§10.6).
+  - **RowData mapping (§16.2):** it belongs to the Iceberg branch (§10.7) and moves to sprint C with that branch.
+- **Diagram:** no change.
+
+### D-029 · 2026-11-25 · Plan §4 sprint B / G1 · `--iceberg.enabled=true` fails fast until sprint C
+- **Prompted by:** plan §4 tests only `--iceberg.enabled=false` in sprint B, and the lake services do not exist yet.
+- **Decision:** with `--iceberg.enabled=true`, `main()` throws "--iceberg.enabled=true needs the Iceberg branch … use make up-core". The submission fails loudly instead of silently running without the lake (G1: keep §4 and the tests meaningful). Until sprint C, `make up` fails at `flink-job`, and `make up-core` is the supported mode. Sprint C replaces this check with the branch.
+- **Diagram:** no change.
+
+### D-030 · 2026-11-25 · §10.11 / §15.7 · Job submitter details
+- **Decision:**
+  - **Where the script lives:** `infra/flink/submit-job.sh` (§17.1) is bind-mounted read-only into `flink-job`, like `create-topics.sh`, because the processor image's build context (`processor/`) cannot reach `infra/`.
+  - **Restore point:** the newest `_metadata` by GNU `find -printf %T@` (sub-second mtime) among `savepoints/*/_metadata` and `checkpoints/*/chk-*/_metadata`.
+  - **Program arguments:** empty values (password, benodes, S3 keys) are left out, so the job's §10.12 defaults apply. The JSON array is built with jq from one argument per line.
+  - **Cleanup:** the uploaded jar is deleted after `/run`, so the JobManager's upload directory does not grow on every `make up`.
+  - **Job id:** none is pinned, so a resubmission gets a new one (E04).
+  - **Logs:** JSON lines with `service=flink-job`.
+  - **Users:** the submitter image runs as uid 9999, and `/flink-data` is created owned by 9999 in both `infra/flink` and the submitter image.
+- **Diagram:** no change.
+
+### D-031 · 2026-11-25 · CLAUDE.md (JSON logs) · Flink logging
+- **Evidence:** `flink:2.1.3-java17` already ships `log4j-layout-template-json-2.24.3.jar` in `/opt/flink/lib`.
+- **Decision:** `infra/flink/log4j-console.properties` is the image's file with the console appender switched to `JsonTemplateLayout` (`JsonLayout.json`) plus an extra `service` field from `ADL_SERVICE` (`flink-jobmanager`, `flink-taskmanager`). The rolling file keeps the plain layout, because the Flink UI shows that file.
+- **Diagram:** no change.
+
+### D-032 · 2026-11-25 · G5 / G1 · `make reconcile` on a core-only stack
+- **Prompted by:** the plan's gate B runs `make reconcile` on `make up-core`. Spec §15.9 defines `make reconcile` as a full reconcile, lake included, but §15.2 says core-only mode has no lake, so the lake query would fail.
+- **Decision:**
+  - `adlctl reconcile` skips the lake comparison, and says so on stderr, when no `iceberg-rest` container is running (core-only mode, or before sprint C).
+  - When the lake profile runs, the lake is always compared, so a missing catalog or lake data still fails. `--no-lake` keeps working.
+  - If docker compose cannot be read, the lake is compared.
+  - `labkit.Reconcile` is unchanged, and the acceptance tests keep passing explicit options.
+- **Evidence:** the unit test `TestLakeRunning`, and a live `make reconcile` on the core stack ("lake comparison skipped …", PASS).
+- **Diagram:** no change.
+
+### D-033 · 2026-11-25 · §15.9 · Processor test and lint in a builder container
+- **Decision:**
+  - `make test` runs `mvn -B test` and `make lint` runs `mvn -B spotless:check` in `maven:3.9.16-eclipse-temurin-17`, with the processor mounted and a named cache volume `adl-maven-repo`.
+  - The volume is outside the compose project, so `make clean` keeps it.
+  - The container is limited to 1536 MiB with a 512 MiB Maven heap; surefire forks with `-Xmx768m`. This keeps it within the memory budget while the core stack runs during the gate.
+  - The Docker image build skips tests (`-DskipTests`), because `make test` runs them.
+  - CI's `java` job runs `mvn verify`, which includes the Spotless check, bound to `verify`.
+- **Diagram:** no change.
