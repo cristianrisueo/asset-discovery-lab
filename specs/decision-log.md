@@ -457,3 +457,134 @@ Each case asserts what its row says. Where a row leaves something open, I chose 
 - **Evidence after:** with the same load, plus gate C and a reconcile: `anon 1575534592` (1.58 GB), heap RSS 941 MB, non-heap 587 MB (before: about 830 MB), `memory.events max 0`. `docker stats`: 1.48 GiB / 1.75 GiB.
 - **Remaining risk:** heap fully touched (1280 MB) plus about 600 MB of non-heap is still close to the limit. Sprint D adds Arrow Flight SQL on the FE. On an OOM kill, follow R9 in order (lower the FE heap within its budget, then move budget between services) and record `docker stats` before and after.
 - **Diagram:** no change.
+
+## Sprint D
+
+### D-039 · 2026-11-25 · G3 · "Latest at build" pins for sprint D
+- **Prompted by:** spec §2.2 (Rust stable ≥ 1.88, Node 24 LTS), §2.3 (`debian:bookworm-slim`, nginx stable-alpine latest at build), §2.6 (Rust crates) and §2.7 (React 19, Vite, TypeScript 5, Vitest, ESLint latest at build); CLAUDE.md: pin exact versions.
+- **Evidence:** the crates.io API (`/api/v1/crates/<crate>` and `/versions`), the Docker Hub tags API and the npm registry (`/<package>/latest`), on 2026-11-25. `arrow-flight 60.2.0` declares `rust-version 1.88`, an empty `default` feature, a `flight-sql` feature, and `tonic = "=0.14.9"`.
+- **Decision:**
+
+  | Item | Version | Note |
+  |---|---|---|
+  | Rust toolchain (`explorer/rust-toolchain.toml`), builder image | **1.100.0**, `rust:1.100.0-bookworm` | Newest stable. The crate keeps `rust-version = "1.88"` (the spec's minimum), so Cargo's MSRV-aware resolver locks transitive crates to 1.88-compatible versions (for example `matchit 0.8.4`) |
+  | Explorer runtime base | `debian:bookworm-20261123-slim` | Newest dated `bookworm-slim` tag |
+  | `arrow-flight` (feature `flight-sql`), `arrow-array`, `arrow-schema` | **60.2.0** | |
+  | `tonic` | **0.14.9** | Required exactly by `arrow-flight 60.2.0` |
+  | `prost` | 0.14.6 | Needed to encode `CommandStatementQuery` |
+  | `axum`, `tokio` | 0.8.9, 1.54.1 | The research versions of §2.6 are still the newest |
+  | `serde`, `serde_json` (`preserve_order`), `tracing`, `tracing-subscriber`, `futures`, `chrono`, `base64` | 1.0.229, 1.0.154, 0.1.44, 0.3.23, 0.3.34, 0.4.45, 0.23.1 | `chrono` and `base64` match what the arrow crates already use |
+  | Dev: `tower` (util), `http-body-util` | 0.5.3, 0.1.5 | Router tests |
+  | Node builder | `node:24.22.3-bookworm-slim` | Newest Node 24 LTS |
+  | nginx | **`nginx:1.30.8-alpine`** | 1.30 is the stable line; 1.31.10 is mainline |
+  | React, react-dom | 19.3.1 | |
+  | Vite, `@vitejs/plugin-react` | 8.3.8, 6.3.0 | The plugin's extra peers are optional |
+  | TypeScript | **5.9.3** | Newest 5.x. TypeScript 7.0.2 exists, but §2.7 says 5.x |
+  | Vitest, jsdom | 5.1.2, 31.0.1 | |
+  | Testing Library: react, dom, jest-dom | 16.3.3, 10.4.2, 8.0.0 | |
+  | ESLint, `@eslint/js`, `typescript-eslint`, `eslint-plugin-react-hooks`, `globals` | 10.15.0, 10.0.1, 8.74.0, 7.1.1, 17.14.0 | |
+  | Prettier | 3.10.1 | |
+  | `@types/react`, `@types/react-dom`, `@types/node` | 19.3.3, 19.3.0, 24.19.4 | `@types/node` follows the Node 24 line |
+
+  Every version is exact in `explorer/Cargo.toml` (`=x.y.z`) and in `web/package.json` (with `save-exact=true` in `web/.npmrc`). `Cargo.lock` and `package-lock.json` are committed. No peer-dependency conflict appeared.
+- **Diagram:** no change.
+
+### D-040 · 2026-11-25 · §3 R4 · Flight SQL ladder: step 1 works
+- **Rule:** R4, the Flight SQL ladder approved on 2026-11-25.
+- **Result:** **step 1** (`arrow-flight`'s Flight SQL protocol over tonic) works first time. Steps 2 (ADBC) and 3 (MySQL) were not needed and are not built. `DORIS_TRANSPORT` other than `flight-sql` stops the explorer at start with a message pointing here.
+- **How it works (`explorer/src/flight.rs`):**
+  - `Handshake` with the FE at `http://doris-fe:8070`, with `authorization: Basic …` (user `explorer`). The FE returns the bearer token in the response header `authorization`.
+  - `GetFlightInfo` with a `CommandStatementQuery` (the §13.4 SQL), carrying `authorization: Bearer <token>`.
+  - For each endpoint, `DoGet` with its ticket against the endpoint's location, with the same bearer token. The record batches are decoded with `FlightRecordBatchStream`.
+  - The session is created once at start and reused. On `UNAUTHENTICATED` the explorer handshakes once more and retries. On transport errors it drops the session and the BE channels, answers 503, and reconnects on the next request. The whole query runs under `QUERY_TIMEOUT_MS`, and the message limit is 64 MiB.
+  - The client is the generated `FlightServiceClient` from `arrow-flight` rather than its `FlightSqlServiceClient` wrapper. The wrapper turns every gRPC status into an `ArrowError` string, which would hide the `UNAUTHENTICATED` and `UNAVAILABLE` codes that §13.6 needs. The wire protocol is the same Flight SQL.
+- **Evidence (live, full stack, 2026-11-25):**
+  - Explorer log: `"Flight SQL handshake done"`, then `"opened Flight SQL channel to the endpoint location","location":"http://172.30.0.3:8050"`.
+  - With `RUST_LOG=explorer=debug`, every `DoGet` shows `raw_location = grpc+tcp://172.30.0.3:8050`: Doris 4.1.5 uses `grpc+tcp://` and the BE's static address. The explorer translates it to `http://` (§13.6).
+  - Arrow types Doris sends (first record batch of each query): `VARCHAR` → `Utf8`; `BIGINT` and `COUNT(*)` → `Int64`; `SELECT 1` → `Int8`; `DATETIME(3)` → `Timestamp(ms)` without a time zone; `DATETIME` (`change_rate_1m`) → `Timestamp(s)`; the lake's `timestamptz(6)` → `Timestamp(µs, "UTC")`. Unit tests in `convert.rs` and `api.rs` cover each of these.
+  - `GET /readyz` → `{"status":"ready","doris_transport":"flight-sql"}`.
+- **Diagram:** no change. The explorer → Doris arrow is Arrow Flight SQL, as drawn.
+
+### D-041 · 2026-11-25 · §13 / G1 · Explorer design details
+- **Prompted by:** points §13 leaves open.
+- **Decisions:**
+  - **Layout:** one crate, flat `src/` (§17.1), layered transport → service → repository: `api.rs` (Axum routes and the request log), `service.rs` (use cases and §13.3 shaping), `flight.rs` (Doris), plus `validate.rs`, `sql.rs`, `convert.rs`, `error.rs`, `config.rs`, `logging.rs`, `health.rs` and `main.rs`.
+  - **Validation (§13.5):** hand-written checks instead of a regex crate. Request values reach SQL only through validated types (`AssetId`, `Filter`, `ListParams`, `minutes`). Axum's own path and query rejections are turned into 400 `invalid_argument` JSON too. Integers accept ASCII digits only: no sign, no exponent. `offset` is capped at `i64::MAX`. An empty `site=` or `os=` is invalid.
+  - **Error mapping:**
+    - 400 `invalid_argument` for bad input;
+    - 404 `not_found` for no asset row, an asset with no lake versions, and unknown routes (JSON body);
+    - 503 `upstream_unavailable` for every Doris failure: transport, timeout, SQL error, or a result the explorer cannot map;
+    - 503 `lake_unavailable` for history when `LAKE_ENABLED=false` (no query is made), or when Doris reports the lake catalog or table as missing, or the object store unreachable.
+    - §13.2 lists no 500, so a SQL error is treated as the upstream being unavailable.
+  - **`LAKE_ENABLED`** is `${ICEBERG_ENABLED:-true}` in compose, so the one lake switch of §15.2 drives both the job and the explorer.
+  - **JSON:** key order follows §13.3 (`serde_json` with `preserve_order`). An empty-string reference is treated like NULL, as in §16.5. Datetimes are rendered with three fractional digits, truncated (not rounded), and `Z`.
+  - **Logs:** a custom `tracing` JSON formatter writes `time`, `level`, `service=explorer`, `target`, `msg` and the event fields on every line, including tonic and hyper events. The middleware logs `route` (the matched path), `method`, `status` and `latency_ms` once per request.
+  - **`explorer healthcheck`** uses `std::net` (an HTTP/1.1 GET of `/healthz` with a 2 s timeout), because the slim image has no curl.
+  - **R6's explorer `REFRESH TABLE` fallback is not implemented.** The catalog accepted `meta.cache.iceberg.table.ttl-second=0` (D-037), and lake lag stays well under 60 s (D03 saw both versions through the explorer about 20 s after the second upsert; C02 took about 13 s).
+  - **`arrow-json` is not used.** The §13.3 shapes (nested `owner`) need typed per-column access anyway, so `convert.rs` reads the columns directly. §2.6 lists the crate only as "same version as `arrow-flight`".
+  - **The runtime** is Tokio with 2 worker threads, inside the explorer's 192 MiB limit. The image runs as uid 10001.
+- **Diagram:** no change.
+
+### D-042 · 2026-11-25 · §14 / G1 · Web design details
+- **Decisions:**
+  - **No router library.** `/` (asset) and `/stats` use `history.pushState` and `popstate`; nginx falls back to `index.html` for client routes.
+  - **`api.ts`** returns `ok | not_found | error` for every call, so every page shows a loading, an empty or "not found", or an error state (§14.2). It only calls relative `/api/*` URLs.
+  - **The asset card** refreshes every 5 s and shows "Last updated …". The history table reloads when the card sees a new version. The stats page refreshes every 15 s. The OS × site table pivots OS rows against site columns, with totals. The change-rate list shows one CSS bar per (window, entity type), scaled to the largest count.
+  - **nginx** (`web/nginx.conf` replaces the image's main configuration):
+    - `worker_processes 2`, so it stays well inside 64 MiB on a 12-CPU VM;
+    - a JSON access log with `"service":"web"`;
+    - `/api/` is proxied with `resolver 127.0.0.11 valid=10s` and a variable `proxy_pass`, so an explorer restarted with a new address is found again;
+    - it listens on IPv4 and IPv6. In Alpine `localhost` resolves to `::1` first, and the §15.6 health check `wget -qO- http://localhost/` was refused while nginx listened only on IPv4. This was found on the first `make up`.
+  - **Tests (§14.4):** `AssetCard.test.tsx` renders the card from the §13.3 fixture, unassigned, and with an owner whose user row is missing. `AssetPage.test.tsx` checks the prefilled LT-0042, a 503 error state, a 404 "not found", and a network error.
+- **Diagram:** no change.
+
+### D-043 · 2026-11-25 · §15.9 / §15.11 · Cargo and npm in builder containers
+- **Decision:**
+  - **Cargo:** `make test` and `make lint` run in `adl/explorer-toolchain:0.1.0`, the `toolchain` stage of `explorer/Dockerfile` (`rust:1.100.0-bookworm` plus rustfmt and clippy), so the image and the linters use the same toolchain. An internal `rust-toolchain` target builds it from the cache. The Cargo registry and `target` live in volumes `adl-cargo-registry` and `adl-cargo-target`; `node_modules` and the npm cache live in `adl-web-node-modules` and `adl-npm-cache`. All four are outside the compose project, like `adl-maven-repo`, so `make clean` keeps them.
+  - **Commands:** `cargo test --locked`; `cargo fmt --check`; `cargo clippy --all-targets --locked -- -D warnings`; `npm ci` then `npm test`, or `npm run lint` (ESLint and Prettier check) and `npm run typecheck` (`tsc --noEmit`). These are the same commands as the CI `rust` and `web` jobs.
+  - **Memory:** the gate runs `make test lint` with the full stack up. The builders are capped (`--memory 3g` and `CARGO_BUILD_JOBS=4` for Cargo, `1536m` for npm), and the caches were warmed with the stack down, so the gate run only re-checks (§15.11, R9).
+- **Diagram:** no change.
+
+### D-044 · 2026-11-25 · §3 R9 / §11.2 / §15.4 · Doris FE heap lowered to 1024m
+- **Rule:** R9 (memory), step 1: "lower JVM heaps … inside that container's budget". It is applied before an OOM kill, as the sprint C audit (F-01) and D-038 asked: measure after the gate D load and act if the FE nears its limit.
+- **What prompted it:** after the first green sprint D gate (with the explorer's Flight SQL load), `doris-fe` was at **1.653 GiB of 1.75 GiB**. Its cgroup `memory.peak` was **1,796,943,872 of `memory.max` 1,879,048,192 (95.6%)**, with `anon 1,700,667,392`. `memory.events max` was still 0 and there was no OOM kill.
+  - Heap: `jcmd GC.heap_info` showed a 1280 MiB G1 heap with only about 170–180 MB live after a young GC (`946M->179M(1280M)` in `fe.gc.log`). The young generation grows across the whole heap, so the heap's RSS was already 1,020 MB and still rising.
+  - Native memory: about 680 MB outside the heap (metaspace 207 MB, code cache, 395 threads, malloc arenas capped by D-038).
+  - A fully touched 1280 MiB heap plus about 680 MB of native memory is about 1.96 GB, more than the 1.88 GB limit. An OOM kill was only a matter of uptime, and sprint E runs much longer than gate D.
+- **Decision:** `infra/doris/fe.Dockerfile` sets the FE heap to `-Xmx1024m -Xms1024m` (build argument `FE_HEAP`) instead of §11.2's 1280m. The container limit (1792 MiB) and the total budget (11,456 MiB) are unchanged. The live heap is about 5× smaller than the new heap.
+- **`docker stats` before** (after the first green gate, 1280m):
+
+  | Container | Usage / limit |
+  |---|---|
+  | doris-fe | **1.653 GiB / 1.75 GiB** |
+  | doris-be | 1.401 GiB / 3.25 GiB |
+  | flink-taskmanager | 1.219 GiB / 2 GiB |
+  | flink-jobmanager | 732.9 MiB / 1.25 GiB |
+  | kafka | 527.6 MiB / 1 GiB |
+  | iceberg-rest | 180 MiB / 512 MiB |
+  | rustfs | 114 MiB / 384 MiB |
+  | dragonfly | 44.9 MiB / 512 MiB |
+  | datacore | 17.7 MiB / 160 MiB |
+  | adapter | 11.8 MiB / 160 MiB |
+  | explorer | 4.4 MiB / 192 MiB |
+  | web | 3.1 MiB / 64 MiB |
+
+- **`docker stats` after** (after a full gate from `make build && make clean && make up` with 1024m: gates A–D 32/32, reconcile PASS):
+
+  | Container | Usage / limit |
+  |---|---|
+  | doris-fe | **1.431 GiB / 1.75 GiB** (81.8%) |
+  | doris-be | 1.4 GiB / 3.25 GiB |
+  | flink-taskmanager | 1.033 GiB / 2 GiB |
+  | flink-jobmanager | 713.9 MiB / 1.25 GiB |
+  | kafka | 708.4 MiB / 1 GiB |
+  | iceberg-rest | 195.3 MiB / 512 MiB |
+  | rustfs | 101 MiB / 384 MiB |
+  | dragonfly | 45.4 MiB / 512 MiB |
+  | datacore | 15 MiB / 160 MiB |
+  | adapter | 11.7 MiB / 160 MiB |
+  | explorer | 4.5 MiB / 192 MiB |
+  | web | 7.3 MiB / 64 MiB |
+
+  FE cgroup after: `memory.peak 1,568,346,112` (83% of the limit), `anon 1,498,374,144`, `memory.events max 0`, `oom_kill 0`. Heap RSS was 843 MB of 1,074 MB. A fully touched heap plus native memory now comes to about 1.71 GB, leaving about 170 MB of margin.
+- **Diagram:** no change. **Spec deviation:** §11.2's FE heap value only; recorded here and in the sprint D build report.
