@@ -1,0 +1,64 @@
+# End-to-end acceptance (spec §16.6): build the images, start the full stack and
+# run every acceptance gate. It is written in sprint 0 and only passes once the
+# whole stack exists (sprint E).
+#
+# The full stack needs about 12 GB of RAM, so the runner must have at least
+# 16 GB. On a smaller runner, use `make up-core` and gates A and B only.
+name: e2e
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.26.11"
+
+jobs:
+  e2e:
+    name: acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/swift
+          docker system prune --all --force
+          df -h /
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.1.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: make build
+        run: make build
+      - name: make up
+        run: make up
+      - name: make acceptance
+        run: make acceptance
+      - name: Collect docker compose logs
+        if: failure()
+        run: |
+          docker compose --profile core --profile lake --profile app ps -a > compose-ps.txt 2>&1 || true
+          docker compose --profile core --profile lake --profile app logs --no-color --timestamps > compose-logs.txt 2>&1 || true
+      - name: Upload docker compose logs
+        if: failure()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: compose-logs
+          path: |
+            compose-ps.txt
+            compose-logs.txt
+          retention-days: 14
+      - name: make clean
+        if: always()
+        run: make clean

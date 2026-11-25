@@ -1,0 +1,188 @@
+# CI (spec §16.6): contracts, Go, Java, Rust, web and image builds.
+# The stack grows sprint by sprint, so the Java, Rust, web and image jobs only
+# run once their component exists (see the detect job).
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26.11"
+  BUF_VERSION: "v1.75.0"
+  GOLANGCI_LINT_VERSION: "v2.15.0"
+
+jobs:
+  detect:
+    name: detect components
+    runs-on: ubuntu-24.04
+    outputs:
+      java: ${{ steps.detect.outputs.java }}
+      rust: ${{ steps.detect.outputs.rust }}
+      web: ${{ steps.detect.outputs.web }}
+      images: ${{ steps.detect.outputs.images }}
+      has_images: ${{ steps.detect.outputs.has_images }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - id: detect
+        name: Detect which components exist
+        run: |
+          flag() { if [ -f "$1" ]; then echo true; else echo false; fi; }
+          {
+            echo "java=$(flag processor/pom.xml)"
+            echo "rust=$(flag explorer/Cargo.toml)"
+            echo "web=$(flag web/package.json)"
+          } >> "$GITHUB_OUTPUT"
+          # Every compose service with a build section, with paths relative to the repository.
+          images="$(docker compose --profile core --profile lake --profile app config --format json \
+            | jq -c --arg root "$PWD" '[(.services // {}) | to_entries[] | select(.value.build)
+                | {service: .key,
+                   context: (.value.build.context | ltrimstr($root) | ltrimstr("/") | if . == "" then "." else . end),
+                   dockerfile: (.value.build.dockerfile // "Dockerfile"),
+                   target: (.value.build.target // "")}]')"
+          echo "images=${images}" >> "$GITHUB_OUTPUT"
+          if [ "${images}" = "[]" ]; then echo "has_images=false"; else echo "has_images=true"; fi >> "$GITHUB_OUTPUT"
+          echo "images: ${images}"
+
+  contracts:
+    name: contracts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7.1.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Install buf
+        run: go install "github.com/bufbuild/buf/cmd/buf@${BUF_VERSION}"
+      - name: buf lint
+        run: buf lint
+      - name: buf breaking
+        run: |
+          if [ "${GITHUB_REF_NAME}" = "main" ] && [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            against="HEAD~1"
+          else
+            git fetch --no-tags origin main:refs/remotes/origin/main || true
+            against="refs/remotes/origin/main"
+          fi
+          if git rev-parse -q --verify "${against}" >/dev/null && git cat-file -e "${against}:buf.yaml" 2>/dev/null; then
+            buf breaking --against ".git#ref=${against}"
+          else
+            echo "buf breaking skipped: ${against} has no contracts yet (first commit)"
+          fi
+      - name: Generated code is up to date
+        run: |
+          buf generate
+          git status --porcelain gen processor/src/generated
+          git diff --exit-code
+          test -z "$(git status --porcelain gen processor/src/generated)"
+
+  go:
+    name: go
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.1.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: go vet
+        run: |
+          go vet ./...
+          go vet -tags acceptance ./acceptance/...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9.3.0
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+      - name: Unit tests (acceptance excluded by its build tag)
+        run: go test -race ./...
+
+  java:
+    name: java
+    needs: detect
+    if: needs.detect.outputs.java == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-java@v6.3.0
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - name: mvn verify (unit tests and Spotless check)
+        run: mvn -B -f processor/pom.xml verify
+
+  rust:
+    name: rust
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: explorer
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install the toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: cargo fmt
+        run: cargo fmt --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test
+
+  web:
+    name: web
+    needs: detect
+    if: needs.detect.outputs.web == 'true'
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: lint
+        run: npm run lint
+      - name: type-check
+        run: npm run typecheck
+      - name: tests
+        run: npm test
+      - name: build
+        run: npm run build
+
+  images:
+    name: image ${{ matrix.image.service }}
+    needs: detect
+    if: needs.detect.outputs.has_images == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.detect.outputs.images) }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v4.4.1
+      - name: docker buildx build (no push)
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.context }}/${{ matrix.image.dockerfile }}
+          target: ${{ matrix.image.target }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.image.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.service }}
