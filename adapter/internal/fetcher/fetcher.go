@@ -135,11 +135,11 @@ func (f *Fetcher) Fetch(ctx context.Context, et contract.EntityType, id string, 
 			return Result{Class: class, Attempts: attempt, Detail: detail}
 		}
 
-		if attempt == f.Backoff.Fast {
+		if attempt == f.Backoff.Fast+1 {
 			// The fast retries are used up: from now on the partition waits
 			// longer between attempts (one log line per escalation, §9.8).
 			f.Log.Warn("retry escalation", "key", key, "version", triggerVersion,
-				"outcome", class.String(), "attempt", attempt, "next_delay_ms", f.Backoff.Nominal(attempt+1).Milliseconds(), "detail", detail)
+				"outcome", class.String(), "attempt", attempt, "delay_ms", delay.Milliseconds(), "detail", detail)
 		} else {
 			f.Log.Debug("retry", "key", key, "version", triggerVersion, "outcome", class.String(),
 				"attempt", attempt, "delay_ms", delay.Milliseconds(), "detail", detail)

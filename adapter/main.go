@@ -19,12 +19,13 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/cristianrisueo/asset-discovery-lab/adapter/internal/cache"
@@ -71,7 +72,7 @@ func main() {
 }
 
 func run(ctx context.Context, cfg config, log *slog.Logger) error {
-	var joined atomic.Bool
+	assigned := newAssignment()
 	tracker := fetcher.NewTracker()
 
 	// One franz-go client consumes triggers and produces entities and dead
@@ -88,14 +89,15 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 		kgo.ProducerLinger(5*time.Millisecond),
 		kgo.OnPartitionsAssigned(func(_ context.Context, _ *kgo.Client, m map[string][]int32) {
-			joined.Store(true)
+			assigned.add(m)
 			log.Info("partitions assigned", "partitions", partitions(m))
 		}),
 		kgo.OnPartitionsRevoked(func(_ context.Context, _ *kgo.Client, m map[string][]int32) {
+			assigned.remove(m)
 			log.Info("partitions revoked", "partitions", partitions(m))
 		}),
 		kgo.OnPartitionsLost(func(_ context.Context, _ *kgo.Client, m map[string][]int32) {
-			joined.Store(false)
+			assigned.remove(m)
 			log.Warn("partitions lost", "partitions", partitions(m))
 		}),
 		kgo.WithLogger(kgoLogger{log}),
@@ -104,7 +106,14 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 		return fmt.Errorf("kafka client: %w", err)
 	}
 
-	conn, err := grpc.NewClient(cfg.DatacoreAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Reconnect to datacore at least as often as the retry policy asks
+	// (RETRY_MAX_MS), not after grpc-go's default of up to 120 s.
+	conn, err := grpc.NewClient(cfg.DatacoreAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff:           backoff.Config{BaseDelay: 100 * time.Millisecond, Multiplier: 1.6, Jitter: 0.2, MaxDelay: cfg.RetryMax},
+			MinConnectTimeout: time.Second,
+		}))
 	if err != nil {
 		kc.Close()
 		return fmt.Errorf("datacore client: %w", err)
@@ -139,8 +148,8 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 	}
 
 	ready := func() (bool, string) {
-		if !joined.Load() {
-			return false, "consumer has not joined group " + cfg.ConsumerGroup
+		if assigned.count() == 0 {
+			return false, "consumer has not joined group " + cfg.ConsumerGroup + " (no partitions assigned)"
 		}
 		if s := tracker.Stalled(time.Now(), TransientStallLimit); len(s) > 0 {
 			return false, fmt.Sprintf("partitions %v in transient retry for more than %s", s, TransientStallLimit)
@@ -159,25 +168,71 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 
 	consumeCtx, stopConsume := context.WithCancel(ctx)
 	defer stopConsume()
-	done := make(chan struct{})
-	go func() { cons.Run(consumeCtx); close(done) }()
+	done := make(chan error, 1)
+	go func() { done <- cons.Run(consumeCtx) }()
 
 	var runErr error
+	consumed := false
 	select {
 	case <-ctx.Done():
 	case runErr = <-httpErr:
+	case runErr = <-done:
+		// A record failed outside shutdown: exit, so the restarted adapter
+		// handles it again from the last committed offset (spec §9.2).
+		consumed = true
 	}
 	// SIGTERM (spec §9.8): stop polling, finish the current batch, commit
 	// (all inside Run), then close.
 	log.Info("adapter shutting down")
 	stopConsume()
-	<-done
+	if !consumed {
+		if err := <-done; err != nil && runErr == nil {
+			runErr = err
+		}
+	}
 	endLife()
-	kc.Close() // leaves the group
+	// The client blocks rebalances while polling; CloseAllowingRebalance lets
+	// it leave the group instead of hanging (franz-go BlockRebalanceOnPoll).
+	kc.CloseAllowingRebalance()
 	sctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = hs.Shutdown(sctx)
 	return runErr
+}
+
+// assignment is the set of partitions the consumer owns; /readyz needs at
+// least one (spec §9.8: the consumer has joined the group).
+type assignment struct {
+	mu  sync.Mutex
+	set map[string]bool
+}
+
+func newAssignment() *assignment { return &assignment{set: map[string]bool{}} }
+
+func (a *assignment) add(m map[string][]int32) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for t, ps := range m {
+		for _, p := range ps {
+			a.set[t+"/"+strconv.Itoa(int(p))] = true
+		}
+	}
+}
+
+func (a *assignment) remove(m map[string][]int32) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for t, ps := range m {
+		for _, p := range ps {
+			delete(a.set, t+"/"+strconv.Itoa(int(p)))
+		}
+	}
+}
+
+func (a *assignment) count() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.set)
 }
 
 func partitions(m map[string][]int32) string {

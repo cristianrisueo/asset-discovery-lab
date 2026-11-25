@@ -86,9 +86,7 @@ func (f *fakeProducer) Produce(_ context.Context, r *kgo.Record, promise func(*k
 }
 
 func newPub(prod Producer, life context.Context) *Publisher {
-	p := New(life, prod, "entities.", "dlq.adapter", slog.New(slog.NewJSONHandler(io.Discard, nil)))
-	p.retryDelay = time.Millisecond
-	return p
+	return New(life, prod, "entities.", "dlq.adapter", slog.New(slog.NewJSONHandler(io.Discard, nil)))
 }
 
 func TestEntityRecord(t *testing.T) {
@@ -118,18 +116,31 @@ func TestAckWaitsForTheBroker(t *testing.T) {
 	}
 }
 
-func TestFailedProduceIsRetriedUntilAcked(t *testing.T) {
-	prod := &fakeProducer{fails: 3}
+// A failed produce is final and never re-sent: re-sending it later could put
+// an older version after a newer one on a compacted topic (audit F-03).
+func TestFailedProduceFailsTheAckWithoutResending(t *testing.T) {
+	prod := &fakeProducer{fails: 1}
 	p := newPub(prod, context.Background())
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := p.DeadLetter(Source{Topic: "triggers"}, ReasonNotFound, "x").Wait(ctx); err != nil {
-		t.Fatalf("dead letter never acked: %v", err)
+	if err := p.DeadLetter(Source{Topic: "triggers"}, ReasonNotFound, "x").Wait(context.Background()); err == nil {
+		t.Fatal("a failed produce resolved without error")
 	}
+	time.Sleep(50 * time.Millisecond)
 	prod.mu.Lock()
 	defer prod.mu.Unlock()
-	if len(prod.records) != 4 {
-		t.Fatalf("%d produce attempts, want 4", len(prod.records))
+	if len(prod.records) != 1 {
+		t.Fatalf("%d produce attempts, want exactly 1", len(prod.records))
+	}
+}
+
+func TestAckedRecordReportsSuccessAfterContextEnds(t *testing.T) {
+	a := newAck()
+	a.resolve(nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for range 100 {
+		if err := a.Wait(ctx); err != nil {
+			t.Fatalf("an acknowledged record reported %v", err)
+		}
 	}
 }
 

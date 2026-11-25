@@ -7,6 +7,7 @@ package consumer
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -42,11 +43,20 @@ type Consumer struct {
 	Grace time.Duration
 }
 
+// ErrIncomplete reports a batch with a record that was not acknowledged
+// while the adapter was not stopping. Consuming further could commit offsets
+// past that record (spec §9.2), so Run stops and the process restarts from the
+// last committed offset, handling the records again in order.
+var ErrIncomplete = errors.New("a record of the batch was not acknowledged")
+
 // Run consumes until ctx ends: then it stops polling, finishes the current
-// batch (within Grace), commits it, and returns (spec §9.8 SIGTERM).
-func (c *Consumer) Run(ctx context.Context) {
+// batch (within Grace), commits it, and returns nil (spec §9.8 SIGTERM). It
+// returns ErrIncomplete when a record fails outside shutdown. Rebalances are
+// always allowed again on return, so closing the client never hangs.
+func (c *Consumer) Run(ctx context.Context) error {
 	work, stopWork := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopWork()
+	defer c.Client.AllowRebalance()
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -66,18 +76,22 @@ func (c *Consumer) Run(ctx context.Context) {
 		if ctx.Err() != nil || fetches.IsClientClosed() {
 			// Records returned together with the shutdown are left
 			// uncommitted: they are handled again after the restart.
-			return
+			return nil
 		}
 		fetches.EachError(func(topic string, partition int32, err error) {
 			c.Log.Warn("fetch error", "topic", topic, "partition", partition, "error", err.Error())
 		})
-		c.processBatch(work, fetches)
+		complete := c.processBatch(work, fetches)
+		if !complete && ctx.Err() == nil {
+			return ErrIncomplete
+		}
 		c.Client.AllowRebalance()
 	}
 }
 
-// processBatch handles one polled batch and commits what is safe to commit.
-func (c *Consumer) processBatch(work context.Context, fetches kgo.Fetches) {
+// processBatch handles one polled batch, commits what is safe to commit, and
+// reports whether every record was acknowledged.
+func (c *Consumer) processBatch(work context.Context, fetches kgo.Fetches) bool {
 	var parts [][]*kgo.Record
 	fetches.EachPartition(func(p kgo.FetchTopicPartition) {
 		if len(p.Records) > 0 {
@@ -85,7 +99,7 @@ func (c *Consumer) processBatch(work context.Context, fetches kgo.Fetches) {
 		}
 	})
 	if len(parts) == 0 {
-		return
+		return true
 	}
 	commit := make([]*kgo.Record, len(parts))
 	var wg sync.WaitGroup
@@ -99,13 +113,17 @@ func (c *Consumer) processBatch(work context.Context, fetches kgo.Fetches) {
 	wg.Wait()
 
 	var toCommit []*kgo.Record
-	for _, r := range commit {
+	complete := true
+	for i, r := range commit {
+		if r != parts[i][len(parts[i])-1] {
+			complete = false
+		}
 		if r != nil {
 			toCommit = append(toCommit, r)
 		}
 	}
 	if len(toCommit) == 0 {
-		return
+		return complete
 	}
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(work), 10*time.Second)
 	defer cancel()
@@ -114,6 +132,7 @@ func (c *Consumer) processBatch(work context.Context, fetches kgo.Fetches) {
 		// adapter restarts before a later commit covers them.
 		c.Log.Warn("offset commit failed", "error", err.Error())
 	}
+	return complete
 }
 
 // handlePartition handles the records of one partition in offset order and

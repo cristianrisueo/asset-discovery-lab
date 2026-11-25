@@ -97,7 +97,8 @@ func TestCommitOnlyAfterEveryPublishIsAcknowledged(t *testing.T) {
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { c.Run(ctx); close(done) }()
+	var runErr error
+	go func() { runErr = c.Run(ctx); close(done) }()
 
 	for range 5 {
 		<-handled
@@ -147,8 +148,11 @@ func TestCommitOnlyAfterEveryPublishIsAcknowledged(t *testing.T) {
 	}
 	cancel()
 	<-done
-	if client.allowed < 1 {
-		t.Fatal("rebalances were never allowed again after the batch")
+	if runErr != nil {
+		t.Fatalf("Run = %v on shutdown, want nil", runErr)
+	}
+	if client.allowed < 2 {
+		t.Fatalf("AllowRebalance called %d times, want after the batch and on return (audit F-01)", client.allowed)
 	}
 }
 
@@ -166,12 +170,23 @@ func TestFailedAckCommitsOnlyThePrefix(t *testing.T) {
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { c.Run(ctx); close(done) }()
+	var runErr error
+	go func() { runErr = c.Run(ctx); close(done) }()
 	<-client.commitCh
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run kept consuming after a record failed outside shutdown")
+	}
 	cancel()
-	<-done
+	if !errors.Is(runErr, ErrIncomplete) {
+		t.Fatalf("Run = %v, want ErrIncomplete", runErr)
+	}
 	if len(client.committed) != 1 || client.committed[0].Offset != 1 {
 		t.Fatalf("committed %v, want only through offset 1", client.committed)
+	}
+	if client.allowed < 1 {
+		t.Fatal("rebalances not allowed again when Run returned")
 	}
 }
 
@@ -185,7 +200,8 @@ func TestShutdownWithUnacknowledgedRecordsCommitsNothing(t *testing.T) {
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { c.Run(ctx); close(done) }()
+	var runErr error
+	go func() { runErr = c.Run(ctx); close(done) }()
 	<-started
 	<-started
 	cancel()
@@ -196,5 +212,11 @@ func TestShutdownWithUnacknowledgedRecordsCommitsNothing(t *testing.T) {
 	}
 	if len(client.committed) != 0 {
 		t.Fatalf("committed %v on shutdown, want nothing", client.committed)
+	}
+	if runErr != nil {
+		t.Fatalf("Run = %v on shutdown, want nil", runErr)
+	}
+	if client.allowed < 1 {
+		t.Fatal("rebalances not allowed again when Run returned on shutdown (audit F-01)")
 	}
 }

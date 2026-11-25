@@ -68,6 +68,11 @@ func Failed(err error) *Ack {
 // Wait blocks until the Ack resolves or ctx ends, and returns its error.
 func (a *Ack) Wait(ctx context.Context) error {
 	select {
+	case <-a.done: // an acknowledged record always reports so, even after ctx ends
+		return a.err
+	default:
+	}
+	select {
 	case <-a.done:
 		return a.err
 	case <-ctx.Done():
@@ -97,10 +102,9 @@ type Publisher struct {
 	log         *slog.Logger
 	now         func() time.Time
 
-	// life ends only when the process stops for good. Failed produces are
-	// retried until then, so a batch never commits past an unacked record.
-	life       context.Context
-	retryDelay time.Duration
+	// life ends only when the process stops for good; records still
+	// buffered then are abandoned and their offsets are not committed.
+	life context.Context
 }
 
 // New returns a publisher. Entity records go to prefix+suffix (for example
@@ -108,7 +112,7 @@ type Publisher struct {
 func New(life context.Context, prod Producer, prefix, dlqTopic string, log *slog.Logger) *Publisher {
 	return &Publisher{
 		prod: prod, entityTopic: func(s string) string { return prefix + s }, dlqTopic: dlqTopic,
-		log: log, now: time.Now, life: life, retryDelay: 500 * time.Millisecond,
+		log: log, now: time.Now, life: life,
 	}
 }
 
@@ -161,31 +165,18 @@ func Truncate(s string, n int) string {
 	return s[:cut]
 }
 
-// send produces rec and retries failed produces until it is acknowledged or
-// the process stops.
+// send produces rec and returns its Ack. franz-go already retries retriable
+// errors internally, so an error here is final. The record is not re-sent:
+// re-sending it later could place an older version after a newer one on a
+// compacted topic. A failed Ack makes the consumer stop before it commits
+// past the record, and the restarted adapter handles it again, in order.
 func (p *Publisher) send(rec *kgo.Record) *Ack {
 	ack := newAck()
-	var try func(attempt int)
-	try = func(attempt int) {
-		r := cloneRecord(rec) // a failed record is never reused by the client
-		p.prod.Produce(p.life, r, func(_ *kgo.Record, err error) {
-			if err == nil {
-				ack.resolve(nil)
-				return
-			}
-			if p.life.Err() != nil {
-				ack.resolve(err)
-				return
-			}
-			p.log.Warn("produce failed; retrying", "topic", rec.Topic, "key", string(rec.Key),
-				"attempt", attempt, "error", err.Error())
-			time.AfterFunc(p.retryDelay, func() { try(attempt + 1) })
-		})
-	}
-	try(1)
+	p.prod.Produce(p.life, rec, func(_ *kgo.Record, err error) {
+		if err != nil {
+			p.log.Error("produce failed", "topic", rec.Topic, "key", string(rec.Key), "error", err.Error())
+		}
+		ack.resolve(err)
+	})
 	return ack
-}
-
-func cloneRecord(r *kgo.Record) *kgo.Record {
-	return &kgo.Record{Topic: r.Topic, Key: r.Key, Value: r.Value, Headers: append([]kgo.RecordHeader(nil), r.Headers...)}
 }
