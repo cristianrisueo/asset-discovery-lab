@@ -8,8 +8,8 @@ External memory between build sessions (sprints plan §2). Read it right after t
 |---|---|---|
 | 0 · Foundations and the test contract | **Done** (gate green, audited, committed) | `specs/sprints/sprint-0/` |
 | A · Ingestion | **Done** (gate green, audited, committed) | `specs/sprints/sprint-A/` |
-| B · Processing | Next | — |
-| C · Lake | Pending | — |
+| B · Processing | **Done** (gate green, audited, committed) | `specs/sprints/sprint-B/` |
+| C · Lake | Next | — |
 | D · Serving | Pending | — |
 | E · Failures and close | Pending | — |
 
@@ -47,6 +47,24 @@ External memory between build sessions (sprints plan §2). Read it right after t
 - **`infra/scripts/`:** `create-topics.sh` and `host-prep.sh`.
 - **Gate A:** 10/10 green, in about 15 s.
 
+## What exists after sprint B
+
+- **Compose, profile `core`, adds:**
+  - `doris-fe` (static IP 172.30.0.2, host ports 8030 and 9030, volume `doris-fe-meta`);
+  - `doris-be` (172.30.0.3, no host ports, volume `doris-be-storage`, nofile 65536);
+  - `doris-init`, one-shot `mysql:8.4.13`;
+  - `flink-jobmanager` (8081), `flink-taskmanager` (2 slots) and the one-shot `flink-job`, all sharing volume `flink-data`.
+
+  The §10.9 Flink configuration lives once, as the `x-flink-properties` YAML anchor.
+- **`make up-core`** reaches ready in about 45 s from clean. `adlctl wait --core` shows the BE row (`172.30.0.3 alive=true`) and the job row (RUNNING).
+- **`infra/doris/`:** `fe.Dockerfile` and `be.Dockerfile` (§11.2 overrides by sed on the default confs) and `init-core.sql` (§11.3–§11.5, §11.7).
+- **`infra/scripts/doris-init.sh <sql-file>`:** waits for a live BE, substitutes `<NAME>` placeholders from the environment, and applies the file. Sprint C reuses it for `init-lake.sql`.
+- **`infra/flink/`:** the cluster `Dockerfile`, `log4j-console.properties` (JSON console logs with `service`), and `submit-job.sh`, which implements §10.11 and is bind-mounted into `flink-job`.
+- **`processor/`:** Maven project (Flink 2.1.3, Kafka connector 5.0.0-2.1, Doris connector 26.3.0, protobuf-java 4.36.2), 25 unit tests, Spotless with google-java-format 1.28.0. The shaded jar is about 75 MB. Packages: `decode`, `gate`, `sink`, `window`; the entry point is `ProcessorJob`.
+- **`make test` and `make lint`** run Maven in `maven:3.9.16-eclipse-temurin-17`, with the cache volume `adl-maven-repo`, outside the compose project.
+- **`adlctl reconcile`** (and so `make reconcile`) skips the lake comparison when no `iceberg-rest` container exists (D-032, refined by D-034).
+- **Gates:** A is 10/10 and B is 9/9 (about 5 minutes; B09 p95 freshness is about 10 s).
+
 ## Key decisions (see `specs/decision-log.md`)
 
 - D-002: kadm v1.20.0, a separate module from franz-go v1.22.3.
@@ -59,21 +77,34 @@ External memory between build sessions (sprints plan §2). Read it right after t
 - D-018: the admin API rejects LT-9999 and LT-8000 to LT-8999.
 - D-022: adapter delivery details: commit after ack, `ErrIncomplete` exit, `CloseAllowingRebalance`, 7 s shutdown grace.
 - D-023: the Go images build from the repository root; `.dockerignore` excludes `processor`, `explorer`, `web` and `infra`.
+- D-025: sprint B pins. google-java-format is 1.28.0, the newest that Spotless allows on JDK 17. JUnit is 5.14.4 through its BOM, aligned with Flink's test utilities.
+- D-026: the Doris election-mode entrypoints. The FE default heap of 8 GB is overridden to 1280m.
+- D-028: the processor design. The Envelope is a Flink POJO, decoding happens in the deserializer, and every operator has a uid.
+- D-029: `--iceberg.enabled=true` fails fast until sprint C.
+- D-030: the submitter details.
+- D-032 and D-034: `adlctl reconcile` skips the lake in core-only mode. D-034 also covers the audit fixes: parallelism passed explicitly, the idempotency check before the slot wait.
 
-## Next: sprint B (Processing)
+## Next: sprint C (Lake)
 
-Plan §4, sprint B:
-- Doris FE and BE (`infra/doris/`, static IPs 172.30.0.2 and .3, outside the dynamic `ip_range`).
-- `doris-init` and the core init SQL with its grants.
-- The Flink image (`infra/flink/`) and the processor job (§10), with `--iceberg.enabled=false` tested.
-- The `flink-job` submitter (§10.11) and `make down` with stop-with-savepoint.
-- Add the Maven test and Spotless steps to `make test` and `make lint` in a builder container. This replaces the "not available until sprint B" stubs, which fail once `processor/pom.xml` exists.
-- The gate also needs `make reconcile`.
+Plan §4, sprint C:
+- `rustfs`, `rustfs-init`, `iceberg-rest` (§12) and `doris-init-lake`, which runs `infra/doris/init-lake.sql` through `infra/scripts/doris-init.sh`. That file holds the catalog of §11.6 and `GRANT SELECT_PRIV ON lake.*.*`. All of them go in profile `lake`.
+- The Iceberg branch of the job (§10.7):
+  - add `iceberg-flink-runtime-2.1`, `iceberg-aws-bundle` and the Hadoop client jars (R7) to `processor/pom.xml`;
+  - replace the fail-fast in `ProcessorJob.main` (D-029) with the branch;
+  - create the namespace and the table at start;
+  - write with `FlinkSink.forRowData` (uid prefix `iceberg-sink`, name `IcebergAssetChanges`);
+  - add the RowData mapper and its unit test (§16.2; moved here from sprint B).
+- Add `iceberg-rest` healthy and `rustfs-init` completed, both `required: false`, to the `flink-job` `depends_on`.
+- The gate uses `make up`, the full stack, from clean. `make reconcile` then compares the lake automatically.
+- The jar will grow a lot. `rest.server.max-content-length` is already 512 MiB (R18).
 
 ## Known issues and notes
 
-- **E04** expects the job resubmitted by `make up` after `make down` to have a new job id. The sprint B submitter must not pin a fixed `jobId`.
+- **E04:** the submitter pins no `jobId`, so the job resubmitted after `make down` and `make up-core` gets a new id and restores from the savepoint. This was checked by hand in sprint B.
+- **`make up` fails at `flink-job` until sprint C** (D-029). Use `make up-core`.
+- **The Doris FE runs close to its 1792 MiB limit** (1.1 to 1.7 GiB RSS). The §11.2 heap of 1280m is committed up front, plus non-heap memory. It has never been OOM-killed. Sprint D adds Flight SQL load, so watch it with `docker stats`. On exit 137, apply R9: lower the FE heap within its budget and record it.
+- **The submitter passes the cluster's `parallelism.default` (2) explicitly** (D-034). Flink's REST run handler would otherwise use 1.
 - **The acceptance precheck** dials only the host ports of §15.8. Every service must publish exactly those ports.
 - **The generator changes LT-0042, U-0117 and G-03 too** (allowed by §5.4). The sprint E walkthrough and README must not assume the seed values; for example, pause the generator or say "from its current site" (sprint A audit F-10).
 - **The adapter exits on purpose** when a produce fails outside shutdown (`ErrIncomplete`), and compose restarts it. A restart loop in its logs points at Kafka, not at the adapter.
-- **Open questions:** Q-001 (interpretations of A05, B08, D04, E04) and Q-002 (how kadm is versioned). Sprint A raised no new ones.
+- **Open questions:** Q-001 (interpretations of A05, B08, D04, E04) and Q-002 (how kadm is versioned). Sprints A and B raised no new ones.

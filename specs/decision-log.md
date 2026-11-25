@@ -379,3 +379,15 @@ Each case asserts what its row says. Where a row leaves something open, I chose 
   - The Docker image build skips tests (`-DskipTests`), because `make test` runs them.
   - CI's `java` job runs `mvn verify`, which includes the Spotless check, bound to `verify`.
 - **Diagram:** no change.
+
+### D-034 · 2026-11-25 · §10.9 / §10.11 · Sprint B audit fixes
+- **Prompted by:** audit findings F-01, F-02, F-04, F-05, F-07 and F-10 (`specs/sprints/sprint-B/audit-report.md`).
+- **Evidence:** before the fix, `/jobs/<id>/config` showed `job-parallelism: 1` although `/jobmanager/config` had `parallelism.default: 2`. Flink's REST run handler uses parallelism 1 when the request does not set it.
+- **Decision:**
+  - **Parallelism:** the submitter passes the cluster's `parallelism.default` explicitly in `POST /jars/{id}/run`. The job runs at parallelism 2, as §10.9 says.
+  - **Step order:** JobManager reachable, then the active-job check (with INITIALIZING counted as present), then a wait for at least `parallelism` free slots. This keeps submission idempotent while a running job holds every slot.
+  - **Robustness:** REST failures are retried with JSON logs. Upload and run time out after 300 s. Savepoint pruning ranks complete savepoints by the mtime of `_metadata` and removes incomplete directories.
+  - **D-032 refined:** `adlctl reconcile` skips the lake only when no `iceberg-rest` container exists. A stopped or crashed one means the lake is compared.
+  - **Log noise:** the logger `org.apache.flink.metrics.MetricGroup` is set to ERROR, which silences the per-checkpoint "pendingCommittables" collision warning from the four chained Doris committers. The metric itself is only dropped from reporting.
+  - **Doris FE memory (F-03):** RSS is about 1.58 GiB of its 1.75 GiB (1792 MiB) limit, with no OOM kill. No change for now; R9 applies on an OOM kill.
+- **Diagram:** no change.

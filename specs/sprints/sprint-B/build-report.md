@@ -80,6 +80,20 @@ Results at the end of the sprint, before the audit:
 | datacore | 14 MiB / 160 MiB |
 | adapter | 10 MiB / 160 MiB |
 
+### After the audit fixes
+
+The full gate was re-run from `make build && make clean && make up-core`:
+
+- **`make up-core`:** ready. The job runs at **parallelism 2** on every vertex (F-01).
+- **Re-running `make up-core` on the live stack:** exit 0 in 19 s, with "already present … nothing to submit" (F-02).
+- **`make test lint`:** green.
+- **Gate A:** 10/10 in 15 s.
+- **Gate B:** 9/9 in 309 s (B09 p95 10.18 s, max 10.20 s).
+- **`make reconcile`:** PASS.
+- **Sprint 0 gate:** green.
+- **`make down`, then `make up-core`:** restored from `savepoint-0e62fa-…` at parallelism 2, and reconcile passed.
+- **Doris FE memory (F-03):** `docker stats` showed between 1.10 and 1.68 GiB of the 1.75 GiB limit over the sprint. It was never OOM-killed. This is a known risk; R9 applies if it is ever killed.
+
 ## Deviations from the plan
 
 - **google-java-format:** pinned at 1.28.0, not at its newest release. Newer releases need Java 21, and Spotless refuses them on JDK 17 (D-025).
@@ -88,6 +102,14 @@ Results at the end of the sprint, before the audit:
 - **`DecodeValidateTest`:** a small extra test of the side-output routing, beyond the plan's list.
 - **`processor/.mvn/jvm.config`:** not needed. google-java-format 1.28.0 runs on JDK 17 without extra flags.
 - **Placeholder bug:** the first `doris-init` run failed on a placeholder-shaped word in a comment of `init-core.sql`. The comment was reworded, and the script still fails loudly on any placeholder without a value.
+- **Audit fixes** (audit report §5, D-034):
+  - F-01: the job now runs at the cluster's parallelism; the REST run handler had defaulted it to 1.
+  - F-02: the active-job check now runs before the free-slot wait.
+  - F-04: the lake is skipped only when no `iceberg-rest` container exists.
+  - F-05: submitter robustness (retries, 300 s upload and run timeouts, safer pruning).
+  - F-06: the unpinned `# syntax` line is removed.
+  - F-07: the metric-collision log noise is silenced.
+  - F-10: INITIALIZING counts as an active job state.
 - **No R-ladder fallback was needed:** R1, R2's benodes, R11's relocation, R13 and R15 all stayed unused.
 
 ## Notes for the next sprints
