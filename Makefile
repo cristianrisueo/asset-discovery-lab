@@ -10,6 +10,11 @@ BUF           ?= go run github.com/bufbuild/buf/cmd/buf@v1.75.0
 GOLANGCI_LINT ?= go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 ADLCTL        := go run ./adlctl
 ALPINE_IMAGE  := alpine:3.24.4
+# Maven builder for the processor (spec §15.9): the same image as processor/Dockerfile.
+# The cache volume is outside the compose project, so make clean keeps it.
+MAVEN_IMAGE   := maven:3.9.16-eclipse-temurin-17
+MAVEN         := docker run --rm -v "$(CURDIR)/processor:/workspace" -v adl-maven-repo:/root/.m2 \
+                 -w /workspace --memory 1536m -e MAVEN_OPTS=-Xmx512m $(MAVEN_IMAGE) mvn -B
 
 COMPOSE_ALL   := docker compose --profile core --profile lake --profile app
 COMPOSE_CORE  := docker compose --profile core
@@ -62,9 +67,7 @@ logs: ## Show logs (SERVICE=name to filter)
 
 test: ## Unit tests: Go on the host; Maven, Cargo and npm in builder containers
 	go test ./...
-	@if [ -f processor/pom.xml ]; then \
-	  echo "processor tests: not available until sprint B"; exit 1; \
-	else echo "processor: not present yet, skipped"; fi
+	$(MAVEN) test
 	@if [ -f explorer/Cargo.toml ]; then \
 	  echo "explorer tests: not available until sprint D"; exit 1; \
 	else echo "explorer: not present yet, skipped"; fi
@@ -78,9 +81,7 @@ lint: ## Linters: buf, golangci-lint, Spotless, rustfmt and clippy, ESLint and t
 	  echo "buf breaking --against '.git#branch=main'"; $(BUF) breaking --against '.git#branch=main'; \
 	else echo "buf breaking: skipped (no main branch with contracts yet)"; fi
 	$(GOLANGCI_LINT) run ./...
-	@if [ -f processor/pom.xml ]; then \
-	  echo "processor lint: not available until sprint B"; exit 1; \
-	else echo "processor: not present yet, skipped"; fi
+	$(MAVEN) spotless:check
 	@if [ -f explorer/Cargo.toml ]; then \
 	  echo "explorer lint: not available until sprint D"; exit 1; \
 	else echo "explorer: not present yet, skipped"; fi

@@ -3,6 +3,33 @@
 # built, each in its final profile (spec §15.2, sprints plan §3.6).
 name: adl
 
+# Flink cluster configuration (spec §10.9), shared by the JobManager and the
+# TaskManager through FLINK_PROPERTIES. Every key is a Flink 2.1 key (spec §3 R17).
+x-flink-properties: &flink-properties |
+  jobmanager.rpc.address: flink-jobmanager
+  rest.address: flink-jobmanager
+  taskmanager.numberOfTaskSlots: 2
+  parallelism.default: 2
+  jobmanager.memory.process.size: 1152m
+  jobmanager.memory.jvm-metaspace.size: 384m
+  taskmanager.memory.process.size: 1792m
+  taskmanager.memory.managed.fraction: 0.1
+  taskmanager.memory.jvm-metaspace.size: 384m
+  state.backend.type: hashmap
+  execution.checkpointing.interval: 10s
+  execution.checkpointing.mode: EXACTLY_ONCE
+  execution.checkpointing.timeout: 2min
+  execution.checkpointing.min-pause: 2s
+  execution.checkpointing.max-concurrent-checkpoints: 1
+  execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+  execution.checkpointing.num-retained: 3
+  execution.checkpointing.dir: file:///flink-data/checkpoints
+  execution.checkpointing.savepoint-dir: file:///flink-data/savepoints
+  restart-strategy.type: exponential-delay
+  heartbeat.interval: 3000
+  heartbeat.timeout: 15000
+  rest.server.max-content-length: 536870912
+
 services:
   # --- Kafka (spec §8) -------------------------------------------------------
   kafka:
@@ -153,9 +180,177 @@ services:
           memory: 160M
     networks: [adl]
 
+  # --- Doris (spec §11) ------------------------------------------------------
+  doris-fe:
+    build:
+      context: ./infra/doris
+      dockerfile: fe.Dockerfile
+    image: adl/doris-fe:0.1.0
+    profiles: [core]
+    hostname: doris-fe
+    restart: unless-stopped
+    environment:
+      # Election mode of the 4.1.5 entrypoint (spec §3 R2, §11.1).
+      FE_SERVERS: fe1:172.30.0.2:9010
+      FE_ID: "1"
+    ports:
+      - "8030:8030"
+      - "9030:9030"
+    volumes:
+      - doris-fe-meta:/opt/apache-doris/fe/doris-meta
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8030/api/bootstrap | grep -q '\"code\":0'"]
+      start_period: 180s
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          memory: 1792M
+    networks:
+      adl:
+        ipv4_address: 172.30.0.2
+
+  doris-be:
+    build:
+      context: ./infra/doris
+      dockerfile: be.Dockerfile
+    image: adl/doris-be:0.1.0
+    profiles: [core]
+    hostname: doris-be
+    restart: unless-stopped
+    depends_on:
+      doris-fe:
+        condition: service_healthy
+    environment:
+      FE_SERVERS: fe1:172.30.0.2:9010
+      BE_ADDR: 172.30.0.3:9050
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - doris-be-storage:/opt/apache-doris/be/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8040/api/health > /dev/null"]
+      start_period: 180s
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          memory: 3328M
+    networks:
+      adl:
+        ipv4_address: 172.30.0.3
+
+  doris-init:
+    image: mysql:8.4.13
+    profiles: [core]
+    restart: "no"
+    depends_on:
+      doris-be:
+        condition: service_healthy
+    environment:
+      DORIS_HOST: doris-fe
+      DORIS_EXPLORER_PASSWORD: ${DORIS_EXPLORER_PASSWORD}
+    volumes:
+      - ./infra/scripts/doris-init.sh:/opt/adl/doris-init.sh:ro
+      - ./infra/doris/init-core.sql:/opt/adl/init-core.sql:ro
+    entrypoint: ["bash", "/opt/adl/doris-init.sh", "/opt/adl/init-core.sql"]
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks: [adl]
+
+  # --- Flink (spec §10) ------------------------------------------------------
+  flink-jobmanager:
+    build:
+      context: ./infra/flink
+    image: adl/flink:0.1.0
+    profiles: [core]
+    hostname: flink-jobmanager
+    restart: unless-stopped
+    command: jobmanager
+    environment:
+      ADL_SERVICE: flink-jobmanager
+      FLINK_PROPERTIES: *flink-properties
+    ports:
+      - "8081:8081"
+    volumes:
+      - flink-data:/flink-data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/overview > /dev/null"]
+      start_period: 90s
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          memory: 1280M
+    networks: [adl]
+
+  flink-taskmanager:
+    build:
+      context: ./infra/flink
+    image: adl/flink:0.1.0
+    profiles: [core]
+    restart: unless-stopped
+    command: taskmanager
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    environment:
+      ADL_SERVICE: flink-taskmanager
+      FLINK_PROPERTIES: *flink-properties
+    volumes:
+      - flink-data:/flink-data
+    # No health check: the submitter waits until the JobManager reports free slots (spec §15.6).
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
+    networks: [adl]
+
+  flink-job:
+    build:
+      context: ./processor
+    image: adl/processor:0.1.0
+    profiles: [core]
+    restart: "no"
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      doris-init:
+        condition: service_completed_successfully
+    environment:
+      FLINK_REST: http://flink-jobmanager:8081
+      # make up-core exports ICEBERG_ENABLED=false (spec §15.2).
+      ICEBERG_ENABLED: ${ICEBERG_ENABLED:-true}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_REGION: ${S3_REGION:-us-east-1}
+    volumes:
+      - flink-data:/flink-data
+      - ./infra/flink/submit-job.sh:/opt/adl/submit-job.sh:ro
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    networks: [adl]
+
 volumes:
   kafka-data:
   datacore-data:
+  doris-fe-meta:
+  doris-be-storage:
+  flink-data:
 
 networks:
   adl:
