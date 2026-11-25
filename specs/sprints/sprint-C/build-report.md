@@ -66,6 +66,18 @@ make reconcile                           # "lake_assets=…" in the PASS line: t
 
 Before D-038, `doris-fe` was at 1.72 GiB / 1.75 GiB, with 7 `memory.max` events (D-038 has the breakdown).
 
+### After the audit fixes
+
+The audit (`audit-report.md`) found no critical or major issue. Two cheap findings were fixed anyway:
+- F-02: a close error in `LakeCatalog` can no longer hide the table-creation error.
+- F-06: `doris-init.sh` masks secrets in its error line.
+
+The full gate was then re-run from `make down && make build && make clean && make up`:
+- gates A 10/10, B 9/9 (B09 p95 10.25 s), C 5/5;
+- `make test lint` green;
+- `make reconcile` PASS with the lake compared;
+- sprint 0 checks green.
+
 ## Deviations from the plan
 
 - **R6 applied (D-037):** Doris 4.1.5 silently ignores `s3.use_path_style`. Its Iceberg FileIO then used virtual-hosted addressing (`UnknownHostException: warehouse.rustfs`). `init-lake.sql` uses `use_path_style`, which R6 names as the fallback. `javap` on the FE jar shows that property binds to Iceberg's `s3.path-style-access`. `meta.cache.iceberg.table.ttl-second` exists in 4.1.5 and is kept. The explorer REFRESH fallback (sprint D) is not needed so far.

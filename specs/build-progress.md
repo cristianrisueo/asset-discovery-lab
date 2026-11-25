@@ -9,8 +9,8 @@ External memory between build sessions (sprints plan §2). Read it right after t
 | 0 · Foundations and the test contract | **Done** (gate green, audited, committed) | `specs/sprints/sprint-0/` |
 | A · Ingestion | **Done** (gate green, audited, committed) | `specs/sprints/sprint-A/` |
 | B · Processing | **Done** (gate green, audited, committed) | `specs/sprints/sprint-B/` |
-| C · Lake | Next | — |
-| D · Serving | Pending | — |
+| C · Lake | **Done** (gate green, audited, committed) | `specs/sprints/sprint-C/` |
+| D · Serving | Next | — |
 | E · Failures and close | Pending | — |
 
 ## What exists after sprint 0
@@ -65,6 +65,27 @@ External memory between build sessions (sprints plan §2). Read it right after t
 - **`adlctl reconcile`** (and so `make reconcile`) skips the lake comparison when no `iceberg-rest` container exists (D-032, refined by D-034).
 - **Gates:** A is 10/10 and B is 9/9 (about 5 minutes; B09 p95 freshness is about 10 s).
 
+## What exists after sprint C
+
+- **Compose, profile `lake`, adds:**
+  - `rustfs` (`rustfs/rustfs:1.0.6`, host ports 9000 and 9001, volume `rustfs-data`);
+  - `rustfs-init`, one-shot `amazon/aws-cli:2.42.4`, running `infra/scripts/create-bucket.sh` (bucket `warehouse`, idempotent);
+  - `iceberg-rest` (`apache/iceberg-rest-fixture:1.10.1`, 8181, volume `iceberg-rest-data` at `/tmp`);
+  - `doris-init-lake`, one-shot, running `infra/doris/init-lake.sql` (catalog `lake` plus `GRANT SELECT_PRIV ON lake.*.*`) through `doris-init.sh`.
+
+  `flink-job` depends on `iceberg-rest` and `rustfs-init` with `required: false`, so `make up-core` still works.
+- **`make up`** (full stack) reaches ready in about 80 s from clean. `make reconcile` now compares the lake (`lake_assets=…` in the PASS line).
+- **`processor/`:**
+  - the Iceberg branch: package `lake` (`LakeTable`, `LakeCatalog`, `LakeRows`);
+  - `main()` creates `inventory.asset_changes` on the JobManager;
+  - `FlinkSink.forRowData` with uid prefix `iceberg-sink`, write parallelism 1;
+  - `ProcessorJob.build(env, options, tableLoader)`, where a null loader means core-only mode;
+  - Iceberg 1.12.0, the AWS bundle and Hadoop 3.4.3 are shaded, so the jar is 222 MiB;
+  - 37 unit tests.
+- **Doris catalog `lake`:** uses `use_path_style`, not the spec's `s3.use_path_style`, which 4.1.5 ignores (D-037). Lake data is visible through Doris about 10–20 s after a change.
+- **`doris-fe`:** has `MALLOC_ARENA_MAX=2` (D-038).
+- **Gates:** A is 10/10, B is 9/9 (B09 p95 about 10.2 s), C is 5/5 (C02 about 13–19 s).
+
 ## Key decisions (see `specs/decision-log.md`)
 
 - D-002: kadm v1.20.0, a separate module from franz-go v1.22.3.
@@ -83,28 +104,31 @@ External memory between build sessions (sprints plan §2). Read it right after t
 - D-029: `--iceberg.enabled=true` fails fast until sprint C.
 - D-030: the submitter details.
 - D-032 and D-034: `adlctl reconcile` skips the lake in core-only mode. D-034 also covers the audit fixes: parallelism passed explicitly, the idempotency check before the slot wait.
+- D-035: sprint C pins (Hadoop 3.4.3, aws-cli 2.42.4) and image checks.
+- D-036: the processor lake design. Iceberg names its writer and committer from the uid prefix; `IcebergAssetChanges` names the terminal sink.
+- D-037: R6. The Doris catalog uses `use_path_style`.
+- D-038: R9, preventive. FE malloc arenas capped.
 
-## Next: sprint C (Lake)
+## Next: sprint D (Serving)
 
-Plan §4, sprint C:
-- `rustfs`, `rustfs-init`, `iceberg-rest` (§12) and `doris-init-lake`, which runs `infra/doris/init-lake.sql` through `infra/scripts/doris-init.sh`. That file holds the catalog of §11.6 and `GRANT SELECT_PRIV ON lake.*.*`. All of them go in profile `lake`.
-- The Iceberg branch of the job (§10.7):
-  - add `iceberg-flink-runtime-2.1`, `iceberg-aws-bundle` and the Hadoop client jars (R7) to `processor/pom.xml`;
-  - replace the fail-fast in `ProcessorJob.main` (D-029) with the branch;
-  - create the namespace and the table at start;
-  - write with `FlinkSink.forRowData` (uid prefix `iceberg-sink`, name `IcebergAssetChanges`);
-  - add the RowData mapper and its unit test (§16.2; moved here from sprint B).
-- Add `iceberg-rest` healthy and `rustfs-init` completed, both `required: false`, to the `flink-job` `depends_on`.
-- The gate uses `make up`, the full stack, from clean. `make reconcile` then compares the lake automatically.
-- The jar will grow a lot. `rest.server.max-content-length` is already 512 MiB (R18).
+Plan §4, sprint D:
+- **explorer** (§13) in `explorer/`, following the Flight SQL ladder (R4); record which step worked.
+- **web** (§14) in `web/`.
+- Both go in profile `app`. `explorer` depends on `doris-init` completed and on `doris-init-lake` completed with `required: false`.
+- **Makefile:** replace the "not available until sprint D" stubs in `make test` and `make lint` with Cargo and npm in builder containers (§15.9).
+- **History endpoint:**
+  - reads `lake.inventory.asset_changes`;
+  - the explorer user already has `Select_priv` on catalog `lake`;
+  - lake timestamps come back as `timestamptz(6)` rather than `DATETIME(3)` (sprint C audit F-04), and must still render as RFC 3339 with milliseconds and `Z`.
+- **Run the heavy Cargo and npm builds with the stack down** (`make down`), then `make build && make clean && make up`.
 
 ## Known issues and notes
 
 - **E04:** the submitter pins no `jobId`, so the job resubmitted after `make down` and `make up-core` gets a new id and restores from the savepoint. This was checked by hand in sprint B.
-- **`make up` fails at `flink-job` until sprint C** (D-029). Use `make up-core`.
-- **The Doris FE runs close to its 1792 MiB limit** (1.1 to 1.7 GiB RSS). The §11.2 heap of 1280m is committed up front, plus non-heap memory. It has never been OOM-killed. Sprint D adds Flight SQL load, so watch it with `docker stats`. On exit 137, apply R9: lower the FE heap within its budget and record it.
+- **The Doris FE is the tightest container.** It is at 1.5 to 1.67 GB of its 1792 MiB limit after D-038, and its heap (1280m) is not fully touched yet. It has never been OOM-killed. Sprint D adds Flight SQL load: watch `docker stats` and `/sys/fs/cgroup/memory.events` in `doris-fe`. On exit 137, apply R9 in order and record it.
+- **Switching between `make up-core` and `make up` needs `make clean`** (§15.2).
 - **The submitter passes the cluster's `parallelism.default` (2) explicitly** (D-034). Flink's REST run handler would otherwise use 1.
 - **The acceptance precheck** dials only the host ports of §15.8. Every service must publish exactly those ports.
 - **The generator changes LT-0042, U-0117 and G-03 too** (allowed by §5.4). The sprint E walkthrough and README must not assume the seed values; for example, pause the generator or say "from its current site" (sprint A audit F-10).
 - **The adapter exits on purpose** when a produce fails outside shutdown (`ErrIncomplete`), and compose restarts it. A restart loop in its logs points at Kafka, not at the adapter.
-- **Open questions:** Q-001 (interpretations of A05, B08, D04, E04) and Q-002 (how kadm is versioned). Sprints A and B raised no new ones.
+- **Open questions:** Q-001 (interpretations of A05, B08, D04, E04) and Q-002 (how kadm is versioned). Sprints A, B and C raised no new ones.

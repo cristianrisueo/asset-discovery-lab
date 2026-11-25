@@ -1,8 +1,6 @@
 package io.github.cristianrisueo.adl.processor.lake;
 
 import io.github.cristianrisueo.adl.processor.JobOptions;
-import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.apache.hadoop.conf.Configuration;
@@ -89,12 +87,11 @@ public final class LakeCatalog {
     return TableLoader.fromCatalog(loader, LakeTable.IDENTIFIER);
   }
 
+  /** Never throws, so a close failure cannot hide the error of the table creation. */
   private static void closeQuietly(Catalog catalog) {
     if (catalog instanceof AutoCloseable c) {
       try {
         c.close();
-      } catch (IOException e) {
-        throw new UncheckedIOException(e);
       } catch (Exception e) {
         LOG.warn("closing the catalog failed", e);
       }

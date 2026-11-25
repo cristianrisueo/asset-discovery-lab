@@ -39,13 +39,17 @@ log INFO "backend alive: $(backends | tr '\n' ' ')"
 
 # Substitute every <NAME> placeholder from the environment variable NAME.
 sql="$(cat "$SQL_FILE")"
+secrets=()
 for name in $(grep -oE '<[A-Z][A-Z0-9_]*>' "$SQL_FILE" | sort -u | tr -d '<>'); do
   value="${!name:-}"
   [ -n "$value" ] || { log ERROR "placeholder <${name}> has no value in the environment"; exit 1; }
   sql="${sql//<${name}>/${value}}"
+  secrets+=("$value")
 done
 
 if ! out="$("${mysql_cmd[@]}" -v <<< "$sql" 2>&1)"; then
+  # mysql -v echoes the statements: mask the substituted values (keys, passwords).
+  for value in "${secrets[@]}"; do out="${out//"${value}"/***}"; done
   log ERROR "init SQL ${SQL_FILE} failed: ${out}"
   exit 1
 fi
