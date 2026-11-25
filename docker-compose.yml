@@ -193,6 +193,9 @@ services:
       # Election mode of the 4.1.5 entrypoint (spec §3 R2, §11.1).
       FE_SERVERS: fe1:172.30.0.2:9010
       FE_ID: "1"
+      # Caps glibc malloc arenas (about 330 MiB across 380+ threads) so the FE's
+      # native memory stays inside its 1792 MiB limit with the §11.2 heap (R9, D-038).
+      MALLOC_ARENA_MAX: "2"
     ports:
       - "8030:8030"
       - "9030:9030"

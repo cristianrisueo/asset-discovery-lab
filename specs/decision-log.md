@@ -391,3 +391,69 @@ Each case asserts what its row says. Where a row leaves something open, I chose 
   - **Log noise:** the logger `org.apache.flink.metrics.MetricGroup` is set to ERROR, which silences the per-checkpoint "pendingCommittables" collision warning from the four chained Doris committers. The metric itself is only dropped from reporting.
   - **Doris FE memory (F-03):** RSS is about 1.58 GiB of its 1.75 GiB (1792 MiB) limit, with no OOM kill. No change for now; R9 applies on an OOM kill.
 - **Diagram:** no change.
+
+## Sprint C
+
+### D-035 · 2026-11-25 · G3 · "Latest at build" pins and image checks for sprint C
+- **Prompted by:** spec §2.3 (`amazon/aws-cli:2.x` latest at build) and §2.4 (Hadoop client "3.4.x, latest at build"); CLAUDE.md: pin exact versions.
+- **Evidence:** `repo1.maven.org/maven2/<artifact>/maven-metadata.xml` and the Docker Hub tags API, on 2026-11-25. The spec's fixed versions resolve: `iceberg-flink-runtime-2.1:1.12.0` (its POM declares no dependencies; it is a shaded bundle), `iceberg-aws-bundle:1.12.0`, `rustfs/rustfs:1.0.6` and `apache/iceberg-rest-fixture:1.10.1`.
+- **Decision:**
+
+  | Item | Version | Note |
+  |---|---|---|
+  | `hadoop-client-api`, `hadoop-client-runtime` | **3.4.3** | Newest 3.4.x. 3.5.0 exists but is outside the spec's 3.4.x line |
+  | `amazon/aws-cli` | **2.42.4** | Newest 2.x tag (`rustfs-init`) |
+  | `flink-table-api-java-bridge`, `flink-table-runtime` | 2.1.3, `provided` | For `RowData`, `GenericRowData` and `InternalTypeInfo`. The image ships `flink-table-api-java-uber-2.1.3.jar` and `flink-table-runtime-2.1.3.jar` in `/opt/flink/lib` |
+
+- **Image checks (spec §15.6, §15.7, R8):**
+  - `rustfs/rustfs:1.0.6` runs as `rustfs` (uid 10001) and owns `/data`, so the named volume inherits a writable directory. No chown init is needed. It has `curl`, so the §15.6 check is used as written. Its server reads `RUSTFS_CONSOLE_ADDRESS`, set to `0.0.0.0:9001`.
+  - `apache/iceberg-rest-fixture:1.10.1` runs as uid 1000 with `CATALOG_URI=jdbc:sqlite:/tmp/iceberg_catalog.db`. `/tmp` is mode 1777, so the named volume at `/tmp` is writable (R8). It has `curl`.
+  - `iceberg-flink-runtime-2.1:1.12.0` bundles `zstd-jni` with `linux/amd64` native libraries, so `write.parquet.compression-codec=zstd` works in the TaskManager.
+- **Diagram:** no change.
+
+### D-036 · 2026-11-25 · §10.7 / §10.10 / R7 / G1 · Processor lake design
+- **Decision:**
+  - **D-029 removed:** `--iceberg.enabled=true` builds the Iceberg branch.
+  - **Table creation:** `main()` runs on the JobManager (§10.12) and calls `LakeCatalog.ensureTable`, which:
+    - creates the namespace `inventory` and the table `asset_changes` in the REST catalog `lake` when they are missing;
+    - treats `AlreadyExistsException` as success.
+  - **Table definition:** `lake.LakeTable` holds the §12.3 schema (ids 1 to 9), `day(changed_at)` and the three properties. The REST catalog stores `format-version` as the table's format version (2), not as a property.
+  - **Wiring:** `ProcessorJob.build(env, options, tableLoader)` takes the `TableLoader`, so tests can pass a local Hadoop table and no network is involved. A null loader means core-only mode, with no branch.
+  - **Row mapping:** `lake.LakeRows` maps assets to `GenericRowData` in schema order. Its row type is `FlinkSchemaUtil.convert(LakeTable.SCHEMA)`, so the Flink type and the Iceberg schema cannot diverge. An empty owner becomes null; timestamps are `TimestampData` (timestamptz); `ingested_at` is the mapping time.
+  - **Catalog properties:** exactly §10.7. Empty S3 keys fail fast with a clear message instead of falling back to the AWS default credential chain. Hadoop `Configuration` comes from the shaded `hadoop-client-api` and `hadoop-client-runtime` (R7). No HTTP-client override was needed.
+  - **Sink:** `FlinkSink.forRowData(...).tableLoader(...).uidPrefix("iceberg-sink").writeParallelism(1).append()` (R7; `IcebergSink` not needed).
+  - **Operator names (G1):** Iceberg names its own operators from the uid prefix:
+    - `iceberg-sink-IcebergStreamWriter` and `iceberg-sink-IcebergFilesCommitter`, with uids under `iceberg-sink`;
+    - the terminal sink that `append()` returns is named `IcebergAssetChanges` (§10.10).
+
+    The builder exposes no way to rename the writer and committer, so the §10.10 name is on the sink and the uid prefix on the stateful operators.
+  - **Extra operators:** `OnlyAssetChanges` (uid `filter-asset-changes`) and `RowDataAssetChanges` (uid `rowdata-asset-changes`).
+  - **Jar size:** the shaded jar is 222 MiB (232,624,133 bytes), below `rest.server.max-content-length` (512 MiB). R18 was not needed.
+- **Diagram:** no change.
+
+### D-037 · 2026-11-25 · §3 R6 · Doris path-style property is `use_path_style`
+- **Rule:** R6, "use `s3.use_path_style = true` … if Doris rejects it, try `use_path_style`".
+- **What failed:** with the §11.6 catalog verbatim, `SELECT … FROM lake.inventory.asset_changes` failed with `errCode = 2, detailMessage = UnknownHostException: warehouse.rustfs`. Doris accepted the property silently but used virtual-hosted addressing.
+- **Evidence:**
+  - `fe.warn.log`: the failure came from `org.apache.iceberg.aws.s3.BaseS3File.getObjectMetadata` → `ManifestLists.read`, under `IcebergExternalMetaCache`. The FE's Iceberg `S3FileIO` was not set to path style.
+  - `javap -v` of `org.apache.doris.datasource.property.storage.S3Properties` in the 4.1.5 `doris-fe.jar`: the field `usePathStyle` has `@ConnectorProperty(names = ["use_path_style", "s3.path-style-access"])`.
+  - `AbstractIcebergProperties.toS3FileIOProperties` copies that field to Iceberg's `s3.path-style-access`. `s3.use_path_style` is not among the names, so it is ignored.
+  - After `ALTER CATALOG lake SET PROPERTIES ("use_path_style" = "true")`, the same query returned 3,796 rows for 3,000 distinct assets.
+- **Decision:**
+  - `infra/doris/init-lake.sql` uses `"use_path_style" = "true"` instead of `"s3.use_path_style"`; every other §11.6 property is verbatim.
+  - `meta.cache.iceberg.table.ttl-second` exists in 4.1.5 (`IcebergExternalMetaCache`, next to the snapshot and manifest cache keys) and is kept as written.
+- **Diagram:** no change.
+
+### D-038 · 2026-11-25 · §3 R9 / §15.4 / G1 · Doris FE: cap glibc malloc arenas
+- **Rule:** R9 (memory), applied before an OOM kill. Its first step is "lower JVM heaps or managed memory inside that container's budget". Here only native memory is lowered: the §11.2 heap of 1280m stays.
+- **What prompted it:** after the first full-stack gate, `doris-fe` was at 1.72 GiB of its 1.75 GiB (1792 MiB) limit. Sprint B saw 1.58–1.68 GiB without the lake.
+  - cgroup `memory.stat`: `anon 1812180992` of `memory.max 1879048192`. `memory.events` showed `max 7`, `oom_kill 0`, `OOMKilled=false`.
+  - smaps of the FE JVM:
+    - the heap had touched only 983 MB of its 1280 MB, so RSS would keep growing toward the limit;
+    - 64 MiB-aligned glibc malloc arenas held 332 MB, across 386 threads and 549 anonymous regions;
+    - metaspace was 198 MB, plus code cache, thread stacks and GC structures.
+  - The FE uses glibc (no jemalloc or tcmalloc mapped), and `start_fe.sh` launches Java with the inherited environment.
+- **Decision:** `MALLOC_ARENA_MAX: "2"` in the `doris-fe` environment.
+- **Evidence after:** with the same load, plus gate C and a reconcile: `anon 1575534592` (1.58 GB), heap RSS 941 MB, non-heap 587 MB (before: about 830 MB), `memory.events max 0`. `docker stats`: 1.48 GiB / 1.75 GiB.
+- **Remaining risk:** heap fully touched (1280 MB) plus about 600 MB of non-heap is still close to the limit. Sprint D adds Arrow Flight SQL on the FE. On an OOM kill, follow R9 in order (lower the FE heap within its budget, then move budget between services) and record `docker stats` before and after.
+- **Diagram:** no change.
