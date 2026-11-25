@@ -329,6 +329,13 @@ services:
         condition: service_completed_successfully
       doris-init:
         condition: service_completed_successfully
+      # Lake dependencies are optional, so make up-core starts without them (spec §15.2).
+      iceberg-rest:
+        condition: service_healthy
+        required: false
+      rustfs-init:
+        condition: service_completed_successfully
+        required: false
     environment:
       FLINK_REST: http://flink-jobmanager:8081
       # make up-core exports ICEBERG_ENABLED=false (spec §15.2).
@@ -345,12 +352,126 @@ services:
           memory: 128M
     networks: [adl]
 
+  # --- Lake (spec §12) -------------------------------------------------------
+  rustfs:
+    image: rustfs/rustfs:1.0.6
+    profiles: [lake]
+    hostname: rustfs
+    restart: unless-stopped
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      # The image owns /data as rustfs (uid 10001), so the volume inherits it (spec §15.7).
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/health > /dev/null"]
+      start_period: 30s
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+    networks: [adl]
+
+  rustfs-init:
+    image: amazon/aws-cli:2.42.4
+    profiles: [lake]
+    restart: "no"
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment:
+      S3_ENDPOINT: http://rustfs:9000
+      BUCKET: warehouse
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
+      AWS_DEFAULT_REGION: ${S3_REGION:-us-east-1}
+    volumes:
+      - ./infra/scripts/create-bucket.sh:/opt/adl/create-bucket.sh:ro
+    entrypoint: ["bash", "/opt/adl/create-bucket.sh"]
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks: [adl]
+
+  iceberg-rest:
+    image: apache/iceberg-rest-fixture:1.10.1
+    profiles: [lake]
+    hostname: iceberg-rest
+    restart: unless-stopped
+    depends_on:
+      rustfs-init:
+        condition: service_completed_successfully
+    environment:
+      # The fixture maps CATALOG_X_Y__Z to the property x.y-z (spec §12.2).
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://rustfs:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
+      AWS_REGION: ${S3_REGION:-us-east-1}
+      JAVA_TOOL_OPTIONS: -Xmx384m
+    ports:
+      - "8181:8181"
+    volumes:
+      # The catalog's SQLite file is /tmp/iceberg_catalog.db (spec §3 R8).
+      - iceberg-rest-data:/tmp
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8181/v1/config > /dev/null"]
+      start_period: 60s
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks: [adl]
+
+  doris-init-lake:
+    image: mysql:8.4.13
+    profiles: [lake]
+    restart: "no"
+    depends_on:
+      doris-init:
+        condition: service_completed_successfully
+      iceberg-rest:
+        condition: service_healthy
+    environment:
+      ADL_SERVICE: doris-init-lake
+      DORIS_HOST: doris-fe
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+    volumes:
+      - ./infra/scripts/doris-init.sh:/opt/adl/doris-init.sh:ro
+      - ./infra/doris/init-lake.sql:/opt/adl/init-lake.sql:ro
+    entrypoint: ["bash", "/opt/adl/doris-init.sh", "/opt/adl/init-lake.sql"]
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks: [adl]
+
 volumes:
   kafka-data:
   datacore-data:
   doris-fe-meta:
   doris-be-storage:
   flink-data:
+  rustfs-data:
+  iceberg-rest-data:
 
 networks:
   adl:

@@ -14,8 +14,8 @@ DORIS_PORT="${DORIS_PORT:-9030}"
 WAIT_TIMEOUT_S="${WAIT_TIMEOUT_S:-600}"
 
 log() {
-  printf '{"time":"%s","level":"%s","service":"doris-init","msg":"%s"}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$(printf '%s' "$2" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')"
+  printf '{"time":"%s","level":"%s","service":"%s","msg":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "${ADL_SERVICE:-doris-init}" "$(printf '%s' "$2" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')"
 }
 
 mysql_cmd=(mysql -h "$DORIS_HOST" -P "$DORIS_PORT" -uroot --connect-timeout=5)
