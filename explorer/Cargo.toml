@@ -1,0 +1,32 @@
+[package]
+name = "explorer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+description = "HTTP JSON API over Doris (Arrow Flight SQL) for asset-discovery-lab (spec §13)"
+
+# Every version is pinned exactly (spec §2.1); Cargo.lock is committed.
+[dependencies]
+arrow-array = "=60.2.0"
+arrow-flight = { version = "=60.2.0", features = ["flight-sql"] }
+arrow-schema = "=60.2.0"
+axum = "=0.8.9"
+base64 = "=0.23.1"
+chrono = { version = "=0.4.45", default-features = false, features = ["std", "clock"] }
+futures = "=0.3.34"
+prost = "=0.14.6"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
+tonic = "=0.14.9"
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["std", "fmt", "env-filter", "registry"] }
+
+[dev-dependencies]
+http-body-util = "=0.1.5"
+tower = { version = "=0.5.3", features = ["util"] }
+
+[profile.release]
+strip = true
