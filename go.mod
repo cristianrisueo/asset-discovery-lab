@@ -12,6 +12,7 @@ require (
 	github.com/twmb/franz-go/pkg/kadm v1.20.0
 	google.golang.org/grpc v1.85.0
 	google.golang.org/protobuf v1.36.12
+	modernc.org/sqlite v1.63.0
 )
 
 require (
@@ -26,12 +27,20 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.20.12 // indirect
 	github.com/aws/smithy-go v1.28.9 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/dustin/go-humanize v1.1.0 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.20.3 // indirect
+	github.com/mattn/go-isatty v0.0.24 // indirect
+	github.com/ncruces/go-strftime v1.1.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.33 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/twmb/franz-go/pkg/kmsg v1.15.1 // indirect
 	go.uber.org/atomic v1.12.0 // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260817212433-ac3dfec99bb1 // indirect
+	modernc.org/libc v1.80.1 // indirect
+	modernc.org/mathutil v1.7.1 // indirect
+	modernc.org/memory v1.12.1 // indirect
 )
