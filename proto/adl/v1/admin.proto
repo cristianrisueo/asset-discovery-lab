@@ -1,0 +1,146 @@
+syntax = "proto3";
+
+package adl.v1;
+
+import "adl/v1/entities.proto";
+
+option go_package = "github.com/cristianrisueo/asset-discovery-lab/gen/go/adl/v1;adlv1";
+option java_multiple_files = true;
+option java_package = "io.github.cristianrisueo.adl.proto.v1";
+
+// AdminService controls the simulated DataCore. Lab use only.
+service AdminService {
+  // Creates the entity (version 1) or changes it (version + 1) and emits a trigger.
+  rpc UpsertAsset(UpsertAssetRequest) returns (UpsertAssetResponse);
+  rpc UpsertUser(UpsertUserRequest) returns (UpsertUserResponse);
+  rpc UpsertGroup(UpsertGroupRequest) returns (UpsertGroupResponse);
+  // Streams every entity of the type, ordered by id.
+  rpc ListAssets(ListAssetsRequest) returns (stream ListAssetsResponse);
+  rpc ListUsers(ListUsersRequest) returns (stream ListUsersResponse);
+  rpc ListGroups(ListGroupsRequest) returns (stream ListGroupsResponse);
+  rpc GetGenerator(GetGeneratorRequest) returns (GetGeneratorResponse);
+  rpc SetGenerator(SetGeneratorRequest) returns (SetGeneratorResponse);
+  rpc GetChaos(GetChaosRequest) returns (GetChaosResponse);
+  rpc SetChaos(SetChaosRequest) returns (SetChaosResponse);
+  // Applies count random generator changes immediately, even when the generator is paused.
+  rpc Burst(BurstRequest) returns (BurstResponse);
+  rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+}
+
+message UpsertAssetRequest {
+  string id = 1;
+  string hostname = 2;
+  AssetKind kind = 3;
+  string os = 4;
+  string site = 5;
+  string owner_user_id = 6;
+}
+
+message UpsertAssetResponse {
+  Asset asset = 1;
+}
+
+message UpsertUserRequest {
+  string id = 1;
+  string display_name = 2;
+  string email = 3;
+  string group_id = 4;
+}
+
+message UpsertUserResponse {
+  User user = 1;
+}
+
+message UpsertGroupRequest {
+  string id = 1;
+  string name = 2;
+}
+
+message UpsertGroupResponse {
+  Group group = 1;
+}
+
+message ListAssetsRequest {}
+
+message ListAssetsResponse {
+  Asset asset = 1;
+}
+
+message ListUsersRequest {}
+
+message ListUsersResponse {
+  User user = 1;
+}
+
+message ListGroupsRequest {}
+
+message ListGroupsResponse {
+  Group group = 1;
+}
+
+message GeneratorConfig {
+  // Changes per second, from 0 to 500.
+  double rate_per_second = 1;
+  bool paused = 2;
+}
+
+message GetGeneratorRequest {}
+
+message GetGeneratorResponse {
+  GeneratorConfig config = 1;
+}
+
+message SetGeneratorRequest {
+  GeneratorConfig config = 1;
+}
+
+message SetGeneratorResponse {
+  GeneratorConfig config = 1;
+}
+
+message ChaosConfig {
+  // Each rate is a probability from 0 to 1. See the datacore chaos table.
+  double duplicate_rate = 1;
+  double malformed_rate = 2;
+  double phantom_rate = 3;
+  double stale_read_rate = 4;
+  // Window after a change during which a read can be stale, from 0 to 10000.
+  int32 stale_window_ms = 5;
+  double unavailable_rate = 6;
+}
+
+message GetChaosRequest {}
+
+message GetChaosResponse {
+  ChaosConfig config = 1;
+}
+
+message SetChaosRequest {
+  ChaosConfig config = 1;
+}
+
+message SetChaosResponse {
+  ChaosConfig config = 1;
+}
+
+message BurstRequest {
+  // From 1 to 10000.
+  int32 count = 1;
+}
+
+message BurstResponse {
+  int32 applied = 1;
+}
+
+message GetStatsRequest {}
+
+message GetStatsResponse {
+  int64 changes_applied = 1;
+  int64 triggers_published = 2;
+  int64 outbox_pending = 3;
+  // Calls to DataCoreService.Get* since start, including failed ones.
+  int64 get_calls = 4;
+  int64 assets = 5;
+  int64 users = 6;
+  int64 groups = 7;
+}

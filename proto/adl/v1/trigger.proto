@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package adl.v1;
+
+import "adl/v1/entities.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/cristianrisueo/asset-discovery-lab/gen/go/adl/v1;adlv1";
+option java_multiple_files = true;
+option java_package = "io.github.cristianrisueo.adl.proto.v1";
+
+// Trigger announces that an entity changed. It never carries the entity.
+message Trigger {
+  EntityType entity_type = 1;
+  string entity_id = 2;
+  int64 version = 3;
+  google.protobuf.Timestamp changed_at = 4;
+}

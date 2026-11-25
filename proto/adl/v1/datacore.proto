@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package adl.v1;
+
+import "adl/v1/entities.proto";
+
+option go_package = "github.com/cristianrisueo/asset-discovery-lab/gen/go/adl/v1;adlv1";
+option java_multiple_files = true;
+option java_package = "io.github.cristianrisueo.adl.proto.v1";
+
+// DataCoreService serves the current state of entities. The adapter calls it.
+service DataCoreService {
+  rpc GetAsset(GetAssetRequest) returns (GetAssetResponse);
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+  rpc GetGroup(GetGroupRequest) returns (GetGroupResponse);
+}
+
+message GetAssetRequest {
+  string id = 1;
+}
+
+message GetAssetResponse {
+  Asset asset = 1;
+}
+
+message GetUserRequest {
+  string id = 1;
+}
+
+message GetUserResponse {
+  User user = 1;
+}
+
+message GetGroupRequest {
+  string id = 1;
+}
+
+message GetGroupResponse {
+  Group group = 1;
+}
