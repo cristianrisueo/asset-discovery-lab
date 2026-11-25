@@ -1,0 +1,15 @@
+# The Go images build from the repository root (one Go module, spec §17.1).
+# Keep the context small: only go.mod, go.sum, gen/ and the service matter.
+.git
+.github
+.env
+logs
+specs
+acceptance
+processor
+explorer
+web
+infra
+**/target
+**/node_modules
+**/*.md

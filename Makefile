@@ -31,20 +31,21 @@ env: ## Create .env from .env.example if it does not exist
 	@test -f .env || { cp .env.example .env && echo "created .env from .env.example"; }
 
 host-prep: ## Set vm.max_map_count in the Docker VM (needed by the Doris BE)
-	docker run --rm --privileged --pid=host $(ALPINE_IMAGE) \
-	  nsenter -t 1 -m -u -n -i sh -c 'sysctl -w vm.max_map_count=2000000'
+	ALPINE_IMAGE=$(ALPINE_IMAGE) ./infra/scripts/host-prep.sh
 
 generate: ## Generate Go and Java code from the contracts (buf generate)
 	$(BUF) generate
 
-build: ## Build every image
-	@echo "build: not available until sprint A"; exit 1
+build: env ## Build every image
+	$(COMPOSE_ALL) build
 
-up: ## Start the full stack (core, lake, app) and wait until it is ready
-	@echo "up: not available until sprint A"; exit 1
+up: env host-prep ## Start the full stack (core, lake, app) and wait until it is ready
+	$(COMPOSE_ALL) up -d
+	$(ADLCTL) wait --timeout 15m
 
-up-core: ## Start the core profile only, without the lake
-	@echo "up-core: not available until sprint A"; exit 1
+up-core: env host-prep ## Start the core profile only, without the lake
+	ICEBERG_ENABLED=false $(COMPOSE_CORE) up -d
+	$(ADLCTL) wait --core --timeout 15m
 
 down: ## Stop the stack with a Flink savepoint; keeps volumes
 	@$(ADLCTL) flink stop-with-savepoint || echo "warning: stop-with-savepoint failed; the next start restores from the newest retained checkpoint"
