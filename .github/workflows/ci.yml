@@ -40,6 +40,8 @@ jobs:
             echo "rust=$(flag explorer/Cargo.toml)"
             echo "web=$(flag web/package.json)"
           } >> "$GITHUB_OUTPUT"
+          # Compose interpolates .env; create it from the lab defaults, like make env.
+          test -f .env || cp .env.example .env
           # Every compose service with a build section, with paths relative to the repository.
           images="$(docker compose --profile core --profile lake --profile app config --format json \
             | jq -c --arg root "$PWD" '[(.services // {}) | to_entries[] | select(.value.build)

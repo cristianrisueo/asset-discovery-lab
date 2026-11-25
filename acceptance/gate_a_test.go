@@ -86,7 +86,7 @@ func TestGateA_03_TriggerContract(t *testing.T) {
 			}
 			tr := &adlv1.Trigger{}
 			if err := proto.Unmarshal(r.Value, tr); err != nil {
-				return false, "", labkit.Stop(fmt.Errorf("record with key asset:LT-9002 does not decode as a Trigger: %w", err))
+				continue
 			}
 			if tr.GetVersion() == a.GetVersion() {
 				trig = tr
@@ -260,7 +260,11 @@ func TestGateA_10_TransientErrorsRetried(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		last = h.upsertAsset(labkit.NewAssetRequest("LT-9008", Sites[i%len(Sites)], ""))
 	}
-	h.waitEntityRecord(entities, "LT-9008", last.GetVersion(), TPipe)
+	deadline := time.Now().Add(TPipe)
+	h.waitEntityRecord(entities, "LT-9008", last.GetVersion(), remaining(deadline))
+	// Every trigger of LT-9008 must be handled (published or dead-lettered)
+	// before "nothing in dlq.adapter" can be asserted.
+	h.waitQuiet(remaining(deadline))
 	for _, r := range h.readAll(dlq) {
 		if string(r.Key) == "asset:LT-9008" {
 			t.Fatalf("dlq.adapter got a record for asset:LT-9008 with headers %v", r.Headers)

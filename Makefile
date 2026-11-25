@@ -73,9 +73,9 @@ test: ## Unit tests: Go on the host; Maven, Cargo and npm in builder containers
 
 lint: ## Linters: buf, golangci-lint, Spotless, rustfmt and clippy, ESLint and tsc
 	$(BUF) lint
-	@if git rev-parse --verify -q main >/dev/null && [ "$$(git rev-parse --abbrev-ref HEAD)" != "main" ]; then \
+	@if git rev-parse --verify -q main >/dev/null && git cat-file -e main:buf.yaml 2>/dev/null; then \
 	  echo "buf breaking --against '.git#branch=main'"; $(BUF) breaking --against '.git#branch=main'; \
-	else echo "buf breaking: skipped (on main, or no main branch)"; fi
+	else echo "buf breaking: skipped (no main branch with contracts yet)"; fi
 	$(GOLANGCI_LINT) run ./...
 	@if [ -f processor/pom.xml ]; then \
 	  echo "processor lint: not available until sprint B"; exit 1; \

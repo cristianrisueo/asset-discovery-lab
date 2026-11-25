@@ -273,7 +273,7 @@ func (t *Tail) Positions() Offsets {
 
 // ReadToEnd reads until every partition reaches the end offsets observed at
 // the start of the call, and returns the records read by this call. A
-// partition that yields nothing for 3 s while behind is treated as caught up:
+// partition that yields nothing for two 3 s polls while behind is treated as caught up:
 // compaction can remove the last records below the end offset.
 func (t *Tail) ReadToEnd(ctx context.Context) ([]Record, error) {
 	end, err := t.k.EndOffsets(ctx, t.topic)
@@ -290,6 +290,7 @@ func (t *Tail) ReadToEnd(ctx context.Context) ([]Record, error) {
 		}
 		return ps
 	}
+	empty := 0
 	for len(behind()) > 0 {
 		pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		fs := t.cl.PollFetches(pctx)
@@ -313,9 +314,15 @@ func (t *Tail) ReadToEnd(ctx context.Context) ([]Record, error) {
 			}
 			return got, t.k.wrap(fmt.Errorf("read %s/%d: %w", fe.Topic, fe.Partition, fe.Err))
 		}
-		if n == 0 {
-			// Nothing arrived within 3 s although the partitions are behind:
-			// the remaining range was compacted away.
+		if n > 0 {
+			empty = 0
+			continue
+		}
+		empty++
+		if empty >= 2 {
+			// Nothing arrived in two 3 s polls although the partitions are
+			// behind: the remaining range was compacted away. Records the
+			// client still has buffered are returned by the next call.
 			for _, p := range behind() {
 				t.pos[p] = end[p]
 			}

@@ -149,8 +149,9 @@ func TestGateD_03_HistoryEndpoint(t *testing.T) {
 
 func TestGateD_04_ListEndpoint(t *testing.T) {
 	h := newHarness(t, gateDServices...)
-	// A quiet system keeps the two pages consistent with each other (spec §16.3).
+	// A quiet, reconciled system keeps the two pages consistent with each other (spec §16.3).
 	h.pauseGenerator()
+	h.reconcile("Doris reconcile", labkit.ReconcileOptions{Timeout: TReconcile, NoLake: true, NoPause: true})
 	page := func(offset int) apiList {
 		u := fmt.Sprintf("%s/api/assets?site=Madrid&limit=10", h.cfg.Explorer)
 		if offset > 0 {

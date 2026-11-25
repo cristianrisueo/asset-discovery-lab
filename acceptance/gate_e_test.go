@@ -243,5 +243,5 @@ func TestGateE_06_DatacoreRestart(t *testing.T) {
 		t.Fatalf("the upsert after the restart gave v%d, want v%d", next.GetVersion(), v+1)
 	}
 	h.waitDorisAsset("LT-9502", v+1, TPipe)
-	h.reconcile("Doris reconcile", labkit.ReconcileOptions{Timeout: TReconcile, NoLake: true})
+	h.reconcile("reconcile", labkit.ReconcileOptions{Timeout: TReconcile})
 }
