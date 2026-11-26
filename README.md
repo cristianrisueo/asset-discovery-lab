@@ -8,7 +8,7 @@ A small, local replica of the new data pipeline Lansweeper is building.
 
 The lab exists to learn that stack hands-on. Correctness under failure matters more than scale or features: duplicates, stale reads, malformed messages and crashes. Everything runs in Docker Compose on one laptop.
 
-The system is specified in [`development/system-spec.md`](development/system-spec.md). Decisions taken while building it are in [`development/decision-log.md`](development/decision-log.md).
+The system is specified in [`docs/development/system-spec.md`](docs/development/system-spec.md). Decisions taken while building it are in [`docs/development/decision-log.md`](docs/development/decision-log.md).
 
 ## Architecture
 
@@ -59,7 +59,7 @@ flowchart LR
 | `explorer/` | The Rust API (Axum, `arrow-flight`) |
 | `web/` | The React app (Vite, TypeScript), served by nginx |
 | `infra/` | The Doris and Flink images and init SQL, plus helper scripts |
-| `development/` | The specification, the build plan, the decision log and the sprint reports |
+| `docs/development/` | The specification, the build plan, the decision log and the sprint reports |
 
 ## Quick start
 
@@ -264,10 +264,10 @@ CI runs `.github/workflows/ci.yml` on every push: contracts, Go, Java, Rust, web
 
 ## How this was built
 
-The base was built in one go by an AI agent (Claude Code), unattended, from [`development/system-spec.md`](development/system-spec.md) and the build order in [`development/sprints-plan.md`](development/sprints-plan.md).
+The base was built in one go by an AI agent (Claude Code), unattended, from [`docs/development/system-spec.md`](docs/development/system-spec.md) and the build order in [`docs/development/sprints-plan.md`](docs/development/sprints-plan.md).
 - Six sprints, 0 and A to E, each in a fresh session.
-- Every sprint planned first, ended with its acceptance gate green, and was reviewed by an independent audit agent. The reports are in `development/sprints/`.
-- Every rule applied, fallback taken and version pinned is in [`development/decision-log.md`](development/decision-log.md); open doubts are in [`development/open-questions.md`](development/open-questions.md).
+- Every sprint planned first, ended with its acceptance gate green, and was reviewed by an independent audit agent. The reports are in `docs/development/sprints/`.
+- Every rule applied, fallback taken and version pinned is in [`docs/development/decision-log.md`](docs/development/decision-log.md); open doubts are in [`docs/development/open-questions.md`](docs/development/open-questions.md).
 
 From here on, the lab is extended through tickets.
 

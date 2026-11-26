@@ -1,0 +1,762 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>asset-discovery-lab</title>
+<meta name="description" content="A local, end-to-end replica of a modern asset-discovery data pipeline: Go, Kafka, Flink, Doris and Iceberg on RustFS, with a Rust API and a React app.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap">
+<script>
+(function () {
+  var th = "";
+  try { th = localStorage.getItem("adl-theme") || ""; } catch (e) {}
+  if (th !== "light" && th !== "dark") {
+    th = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  document.documentElement.setAttribute("data-theme", th);
+})();
+</script>
+<style>
+
+/* Una sola vista: resumen con recorrido desplegable, diagrama ancho con fichas por pieza y el dato de cada paso debajo. */
+:root {
+  --bg: #f3f4f9; --surface: #ffffff; --fg: #151a32; --muted: #5b6283; --line: #dde1ef; --edge: #c3c9df;
+  --go: #6a4cff; --go-soft: #ece8ff; --on-go: #ffffff;
+  --kafka: #e8610c; --kafka-soft: #ffe9da;
+  --cache: #12955a; --cache-soft: #dcf4e6;
+  --flink: #d6336c; --flink-soft: #fde3ec;
+  --doris: #1a6fe0; --doris-soft: #e1edff;
+  --query: #0a93b3; --query-soft: #d8f3f9;
+  --lake: #5f6c94; --lake-soft: #e6eaf4;
+  --packet: #ffc400; --packet-ring: #b88600;
+  --shadow: 0 14px 36px rgba(21, 26, 50, .18);
+  --font-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "Space Grotesk", "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0b0e1c; --surface: #141a30; --fg: #e9ecf8; --muted: #9aa1c4; --line: #262d4a; --edge: #39416a;
+    --go: #9179ff; --go-soft: #251e52; --on-go: #0b0e1c;
+    --kafka: #ff8a3d; --kafka-soft: #3f2513;
+    --cache: #3ad07b; --cache-soft: #103a24;
+    --flink: #ff5c93; --flink-soft: #45152a;
+    --doris: #5aa2ff; --doris-soft: #132a4c;
+    --query: #3fd2f0; --query-soft: #0e3542;
+    --lake: #9aa6cc; --lake-soft: #1f2744;
+    --packet: #ffd23f; --packet-ring: #ffefb0;
+    --shadow: 0 14px 36px rgba(0, 0, 0, .55);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0b0e1c; --surface: #141a30; --fg: #e9ecf8; --muted: #9aa1c4; --line: #262d4a; --edge: #39416a;
+  --go: #9179ff; --go-soft: #251e52; --on-go: #0b0e1c;
+  --kafka: #ff8a3d; --kafka-soft: #3f2513;
+  --cache: #3ad07b; --cache-soft: #103a24;
+  --flink: #ff5c93; --flink-soft: #45152a;
+  --doris: #5aa2ff; --doris-soft: #132a4c;
+  --query: #3fd2f0; --query-soft: #0e3542;
+  --lake: #9aa6cc; --lake-soft: #1f2744;
+  --packet: #ffd23f; --packet-ring: #ffefb0;
+  --shadow: 0 14px 36px rgba(0, 0, 0, .55);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.55; }
+code { font-family: var(--font-mono); font-size: .88em; }
+.wrap {
+  max-width: 1480px; margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 24px 56px;
+  display: flex; flex-direction: column; gap: 20px;
+}
+header { display: flex; flex-direction: column; gap: 10px; }
+.eyebrow { margin: 0; font-family: var(--font-mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+h1 { margin: 0; font-family: var(--font-display); font-size: clamp(28px, 4.4vw, 40px); font-weight: 700; letter-spacing: -.015em; text-wrap: balance; }
+.lede { margin: 0; max-width: 118ch; color: var(--muted); font-size: 16px; }
+.lede b { color: var(--fg); font-weight: 600; }
+
+button {
+  font: inherit; font-size: 14px; font-weight: 500; color: var(--fg);
+  background: var(--surface); border: 1px solid var(--line); border-radius: 9px; padding: 8px 14px; cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--go); }
+button:focus-visible { outline: 2px solid var(--go); outline-offset: 2px; }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--go); border-color: var(--go); color: var(--on-go); }
+button.more { align-self: flex-start; display: inline-flex; align-items: center; gap: 8px; }
+button.more .chev { display: inline-block; transition: transform .2s; }
+button.more[aria-expanded="true"] .chev { transform: rotate(180deg); }
+
+/* Recorrido completo desplegable */
+.journey { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
+.journey-head h2 { margin: 0; font-family: var(--font-display); font-size: 20px; font-weight: 600; }
+ol.jlist { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 0 32px; }
+ol.jlist li { min-width: 0; padding: 12px 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 3px; }
+ol.jlist h3 { margin: 0; font-size: 15px; font-weight: 600; }
+ol.jlist p { margin: 0; font-size: 14px; color: var(--muted); }
+.journey-foot { display: flex; justify-content: flex-end; }
+
+.sec { display: flex; flex-direction: column; gap: 12px; }
+.sec-head { display: flex; flex-direction: column; gap: 4px; }
+.sec-head h2 { margin: 0; font-family: var(--font-display); font-size: 24px; font-weight: 600; letter-spacing: -.01em; text-wrap: balance; }
+.sec-head p { margin: 0; color: var(--muted); max-width: 92ch; }
+.swatch { width: 14px; height: 14px; border-radius: 4px; background: var(--cat-soft); border: 2px solid var(--cat); flex: 0 0 auto; }
+
+/* Diagrama */
+figure.map-fig { margin: 0; display: flex; flex-direction: column; gap: 8px; }
+.map-wrap { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; overflow-x: auto; }
+.map-stage { position: relative; min-width: 1100px; }
+svg.map { display: block; width: 100%; height: auto; }
+figcaption { font-size: 13px; color: var(--muted); }
+.edge { fill: none; stroke: var(--edge); stroke-width: 2.2; transition: opacity .3s, stroke .3s; }
+.edge.on { stroke-width: 3.4; stroke-dasharray: 9 7; animation: dash 1s linear infinite; }
+.edge.on.c-kafka { stroke: var(--kafka); } .edge.on.c-grpc { stroke: var(--go); } .edge.on.c-cache { stroke: var(--cache); }
+.edge.on.c-stream { stroke: var(--doris); } .edge.on.c-query { stroke: var(--query); } .edge.on.c-lake { stroke: var(--lake); }
+@keyframes dash { to { stroke-dashoffset: -32; } }
+.arrowhead { fill: var(--edge); }
+.elabel { font-family: var(--font-body); font-size: 13px; font-weight: 500; fill: var(--muted); transition: opacity .3s; }
+.elabel.link { fill: var(--fg); font-weight: 600; text-decoration: underline dotted; cursor: pointer; pointer-events: auto; }
+.elabel.link:hover, .elabel.link:focus-visible { fill: var(--go); }
+.elabel.link:focus { outline: none; }
+.elabel.link.picked { fill: var(--go); opacity: 1; }
+.dim { opacity: .26; }
+#edges, #packets { pointer-events: none; }
+.node { transition: opacity .3s; cursor: pointer; }
+.node:focus { outline: none; }
+.node rect.box { stroke-width: 2.2; transition: stroke-width .25s; }
+.node rect.halo { fill: none; stroke-width: 12; opacity: 0; transition: opacity .3s; }
+.node.on rect.box { stroke-width: 3.4; }
+.node.on rect.halo { opacity: .28; }
+.node:not(.on):hover rect.halo { opacity: .16; }
+.node:focus-visible rect.halo { opacity: .4; }
+.node.picked { opacity: 1; }
+.node.picked rect.box { stroke-width: 3.6; }
+.node.picked rect.halo { opacity: .34; }
+.c-go rect.box { fill: var(--go-soft); stroke: var(--go); } .c-go rect.halo { stroke: var(--go); }
+.c-kafka rect.box { fill: var(--kafka-soft); stroke: var(--kafka); } .c-kafka rect.halo { stroke: var(--kafka); }
+.c-cache rect.box { fill: var(--cache-soft); stroke: var(--cache); } .c-cache rect.halo { stroke: var(--cache); }
+.c-flink rect.box { fill: var(--flink-soft); stroke: var(--flink); } .c-flink rect.halo { stroke: var(--flink); }
+.c-doris rect.box { fill: var(--doris-soft); stroke: var(--doris); } .c-doris rect.halo { stroke: var(--doris); }
+.c-query rect.box { fill: var(--query-soft); stroke: var(--query); } .c-query rect.halo { stroke: var(--query); }
+.c-lake rect.box { fill: var(--lake-soft); stroke: var(--lake); } .c-lake rect.halo { stroke: var(--lake); }
+.ntitle { font-family: var(--font-display); font-size: 18px; font-weight: 600; fill: var(--fg); }
+.nsub { font-family: var(--font-body); font-size: 12.5px; fill: var(--muted); }
+.pk-glow { fill: var(--packet); opacity: .45; }
+.pk-core { fill: var(--packet); stroke: var(--packet-ring); stroke-width: 2; }
+.pk-label {
+  font-family: var(--font-body); font-size: 13px; font-weight: 600; fill: var(--fg);
+  paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round;
+}
+.map-hint { display: none; margin: 0; font-size: 12.5px; color: var(--muted); }
+
+/* Ficha de cada pieza */
+.pop {
+  position: absolute; z-index: 5; width: 400px; max-width: calc(100% - 16px); max-height: calc(100% - 16px); overflow: auto;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+  padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;
+}
+.pop.sheet {
+  position: fixed; z-index: 20; width: auto; max-width: none; max-height: 70vh; top: auto;
+  left: max(12px, env(safe-area-inset-left, 0px)); right: max(12px, env(safe-area-inset-right, 0px));
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+}
+.pop-head { display: flex; align-items: center; gap: 9px; }
+.pop-head h3 { margin: 0; flex: 1; min-width: 0; font-family: var(--font-display); font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+button.pop-close { border: 0; background: transparent; padding: 2px 8px; font-size: 22px; line-height: 1; color: var(--muted); }
+button.pop-close:hover { color: var(--fg); }
+.pop .tech { margin: -6px 0 0; font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+.pop dl { margin: 0; display: flex; flex-direction: column; gap: 10px; }
+.pop dt { font-size: 11.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.pop dd { margin: 3px 0 0; font-size: 14px; }
+.pop dd p { margin: 0 0 6px; }
+.pop dd p:last-child { margin: 0; }
+
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.progress { margin-left: auto; font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.narration { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.step-title { margin: 0; font-family: var(--font-display); font-size: 19px; font-weight: 600; }
+.step-text { margin: 0; max-width: 86ch; }
+.code-label { margin: 6px 0 0; font-size: 11.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.step-code {
+  margin: 0; padding: 12px 14px; border-radius: 9px; background: var(--bg); border: 1px solid var(--line);
+  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55; overflow-x: auto; white-space: pre;
+}
+
+@media (max-width: 720px) {
+  .progress { margin-left: 0; width: 100%; }
+  .map-hint { display: block; }
+  ol.jlist { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .edge.on { animation: none; }
+  * { transition: none !important; }
+}
+
+
+/* Landing additions */
+[hidden] { display: none !important; }
+body { margin: 0; }
+a { color: var(--go); }
+.page {
+  max-width: 1480px; margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.topbar { position: sticky; top: 0; z-index: 30; background: var(--bg); border-bottom: 1px solid var(--line); }
+.topbar .page { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 18px; padding-block: 10px; }
+.brand { font-family: var(--font-mono); font-weight: 500; font-size: 14px; color: var(--fg); text-decoration: none; }
+.navlinks { display: flex; flex-wrap: wrap; gap: 4px 18px; }
+.navlinks a { color: var(--muted); text-decoration: none; font-size: 14px; }
+.navlinks a:hover { color: var(--fg); }
+.tools { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; background: var(--surface); }
+.seg button { border: 0; border-radius: 0; padding: 6px 12px; font-size: 13px; background: transparent; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--go); color: var(--on-go); }
+.seg button:hover:not(:disabled) { border-color: var(--line); }
+
+.hero { padding-block: 56px 16px; display: flex; flex-direction: column; gap: 18px; }
+.hero h1 { font-size: clamp(36px, 7vw, 64px); line-height: 1.05; }
+.tagline { margin: 0; font-family: var(--font-display); font-size: clamp(19px, 2.6vw, 26px); font-weight: 500; max-width: 40ch; text-wrap: balance; }
+.hero .lede { max-width: 80ch; }
+.cta { display: flex; flex-wrap: wrap; gap: 10px; }
+a.btn {
+  display: inline-flex; align-items: center; font-size: 14px; font-weight: 500; text-decoration: none; color: var(--fg);
+  background: var(--surface); border: 1px solid var(--line); border-radius: 9px; padding: 9px 16px;
+}
+a.btn:hover { border-color: var(--go); }
+a.btn.primary { background: var(--go); border-color: var(--go); color: var(--on-go); }
+a:focus-visible { outline: 2px solid var(--go); outline-offset: 2px; }
+.flow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.pill {
+  font-family: var(--font-mono); font-size: 12.5px; padding: 6px 11px; border-radius: 999px;
+  border: 2px solid var(--c); background: var(--cs); color: var(--fg);
+}
+.pill.go { --c: var(--go); --cs: var(--go-soft); }
+.pill.kafka { --c: var(--kafka); --cs: var(--kafka-soft); }
+.pill.flink { --c: var(--flink); --cs: var(--flink-soft); }
+.pill.doris { --c: var(--doris); --cs: var(--doris-soft); }
+.pill.lake { --c: var(--lake); --cs: var(--lake-soft); }
+.pill.query { --c: var(--query); --cs: var(--query-soft); }
+.sep { color: var(--muted); font-family: var(--font-mono); }
+
+.figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; padding-block: 24px 8px; }
+.fig { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; min-width: 0; }
+.fig b { display: block; font-family: var(--font-display); font-size: 30px; font-weight: 700; letter-spacing: -.01em; overflow-wrap: anywhere; }
+.fig span { color: var(--muted); font-size: 14px; }
+
+.block { padding-block: 36px 8px; display: flex; flex-direction: column; gap: 14px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { font-family: var(--font-mono); font-size: 13px; padding: 6px 12px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); }
+
+.cmd { position: relative; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+.cmd pre { margin: 0; padding: 16px 96px 16px 18px; font-family: var(--font-mono); font-size: 13.5px; line-height: 1.7; overflow-x: auto; white-space: pre; }
+.cmd button { position: absolute; top: 10px; right: 10px; padding: 5px 11px; font-size: 13px; }
+.after code, .hero code { background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; }
+.after { margin: 0; color: var(--muted); max-width: 92ch; }
+.after code { color: var(--fg); }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+a.card { display: flex; flex-direction: column; gap: 4px; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; color: var(--fg); text-decoration: none; min-width: 0; }
+a.card:hover { border-color: var(--go); }
+a.card b { font-family: var(--font-display); font-size: 17px; font-weight: 600; }
+a.card span { color: var(--muted); font-size: 14px; }
+
+footer.site { margin-top: 48px; border-top: 1px solid var(--line); padding-block: 24px 40px; color: var(--muted); font-size: 14px; }
+.map-sec { padding-block: 36px 0; }
+section[id] { scroll-margin-top: 64px; }
+@media (max-width: 720px) {
+  .topbar { position: static; }
+  section[id] { scroll-margin-top: 12px; }
+  .hero { padding-block: 32px 8px; }
+}
+.map-sec .more-row { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+</style>
+</head>
+<body>
+
+<nav class="topbar" aria-label="Main">
+  <div class="page">
+    <a class="brand" href="#top">asset-discovery-lab</a>
+    <div class="navlinks">
+      <a href="#how-it-works" data-i18n="nav_map">How it works</a>
+      <a href="#run" data-i18n="nav_run">Run it</a>
+      <a href="#built" data-i18n="nav_built">How it was built</a>
+      <a href="https://github.com/cristianrisueo/asset-discovery-lab" data-i18n="nav_github">GitHub</a>
+    </div>
+    <div class="tools">
+      <div class="seg" role="group" data-i18n-aria="lang_label" aria-label="Language">
+        <button type="button" id="langEn" aria-pressed="true" lang="en">EN</button>
+        <button type="button" id="langEs" aria-pressed="false" lang="es">ES</button>
+      </div>
+      <div class="seg" role="group" data-i18n-aria="theme_label" aria-label="Theme">
+        <button type="button" id="thLight" aria-pressed="false" data-i18n="theme_light">Light</button>
+        <button type="button" id="thDark" aria-pressed="false" data-i18n="theme_dark">Dark</button>
+      </div>
+    </div>
+  </div>
+</nav>
+
+<main id="top">
+  <div class="page">
+    <section class="hero">
+      <p class="eyebrow" data-i18n="hero_eyebrow">Learning project · open source</p>
+      <h1>asset-discovery-lab</h1>
+      <p class="tagline" data-i18n="hero_tagline"></p>
+      <p class="lede" data-i18n-html="hero_lede"></p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/cristianrisueo/asset-discovery-lab" data-i18n="cta_github">View on GitHub</a>
+        <a class="btn" href="#how-it-works" data-i18n="cta_map">Explore the map</a>
+        <a class="btn" href="https://github.com/cristianrisueo/asset-discovery-lab/blob/main/CHANGELOG.md" data-i18n="cta_changelog">Changelog</a>
+      </div>
+      <div class="flow" aria-hidden="true">
+        <span class="pill go">datacore</span><span class="sep">→</span>
+        <span class="pill kafka">Kafka</span><span class="sep">→</span>
+        <span class="pill go">adapter</span><span class="sep">→</span>
+        <span class="pill flink">Flink</span><span class="sep">→</span>
+        <span class="pill doris">Doris</span><span class="sep">+</span>
+        <span class="pill lake">Iceberg</span><span class="sep">→</span>
+        <span class="pill query">explorer</span><span class="sep">→</span>
+        <span class="pill query">web</span>
+      </div>
+    </section>
+
+    <section class="figures">
+      <div class="fig"><b data-i18n="fig1_n"></b><span data-i18n="fig1_l"></span></div>
+      <div class="fig"><b data-i18n="fig2_n"></b><span data-i18n="fig2_l"></span></div>
+      <div class="fig"><b data-i18n="fig3_n"></b><span data-i18n="fig3_l"></span></div>
+      <div class="fig"><b data-i18n="fig4_n"></b><span data-i18n="fig4_l"></span></div>
+    </section>
+
+    <section class="block" id="stack">
+      <div class="sec-head">
+        <h2 data-i18n="stack_h2"></h2>
+        <p data-i18n="stack_p"></p>
+      </div>
+      <div class="chips">
+        <span class="chip">Go</span><span class="chip">Java</span><span class="chip">Rust · Axum</span><span class="chip">React</span>
+        <span class="chip">Kafka</span><span class="chip">Flink 2.1</span><span class="chip">Doris 4.1</span><span class="chip">Iceberg</span>
+        <span class="chip">RustFS</span><span class="chip">Dragonfly</span><span class="chip">gRPC</span><span class="chip">Arrow Flight SQL</span>
+        <span class="chip">Docker Compose</span>
+      </div>
+    </section>
+
+    <section class="map-sec sec" id="how-it-works">
+      <div class="sec-head">
+        <h2 data-i18n="map_h2"></h2>
+        <p data-i18n="map_p"></p>
+      </div>
+      <div class="more-row">
+        <button class="more" id="moreBtn" type="button" aria-expanded="false" aria-controls="journey">
+          <span id="moreLabel"></span><span class="chev" aria-hidden="true">▾</span>
+        </button>
+        <section class="journey" id="journey" aria-labelledby="journeyTitle" hidden style="align-self: stretch;">
+          <div class="journey-head"><h2 id="journeyTitle"></h2></div>
+          <ol class="jlist" id="jlist"></ol>
+          <div class="journey-foot"><button type="button" id="journeyClose"></button></div>
+        </section>
+      </div>
+      <p class="map-hint" data-i18n="map_hint"></p>
+      <figure class="map-fig">
+        <div class="map-wrap">
+          <div class="map-stage" id="stage">
+            <svg class="map" id="map" viewBox="0 0 1460 710" role="group">
+              <defs>
+                <filter id="glow" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="5"></feGaussianBlur></filter>
+                <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrowhead"></path></marker>
+              </defs>
+              <g id="edges"></g>
+              <g id="nodes"></g>
+              <g id="packets"></g>
+            </svg>
+            <div class="pop" id="pop" role="dialog" aria-labelledby="popTitle" hidden>
+              <div class="pop-head">
+                <span class="swatch" id="popSwatch"></span>
+                <h3 id="popTitle"></h3>
+                <button class="pop-close" id="popClose" type="button">×</button>
+              </div>
+              <p class="tech" id="popTech"></p>
+              <dl>
+                <div><dt id="popIsLabel"></dt><dd id="popIs"></dd></div>
+                <div><dt id="popWhatLabel"></dt><dd id="popWhat"></dd></div>
+              </dl>
+            </div>
+          </div>
+        </div>
+        <figcaption data-i18n="map_cap"></figcaption>
+      </figure>
+
+      <div class="controls" role="group" id="controls">
+        <button id="prev" type="button"></button>
+        <button id="next" type="button" class="primary"></button>
+        <button id="replay" type="button"></button>
+        <button id="play" type="button"></button>
+        <span id="progress" class="progress"></span>
+      </div>
+
+      <div class="narration" aria-live="polite">
+        <p class="step-title" id="stepTitle"></p>
+        <p class="step-text" id="stepText"></p>
+        <p class="code-label" id="codeLabel" hidden></p>
+        <pre class="step-code" id="stepCode" hidden></pre>
+      </div>
+    </section>
+
+    <section class="block" id="run">
+      <div class="sec-head">
+        <h2 data-i18n="run_h2"></h2>
+        <p data-i18n="run_p"></p>
+      </div>
+      <div class="cmd">
+        <pre id="cmdText">git clone https://github.com/cristianrisueo/asset-discovery-lab.git
+cd asset-discovery-lab
+make env
+make build
+make up</pre>
+        <button type="button" id="copyBtn"></button>
+      </div>
+      <p class="after" data-i18n-html="run_after"></p>
+    </section>
+
+    <section class="block" id="built">
+      <div class="sec-head">
+        <h2 data-i18n="built_h2"></h2>
+        <p data-i18n="built_p"></p>
+      </div>
+      <div class="cards">
+        <a class="card" href="https://github.com/cristianrisueo/asset-discovery-lab/blob/main/docs/development/system-spec.md"><b data-i18n="card1_t"></b><span data-i18n="card1_d"></span></a>
+        <a class="card" href="https://github.com/cristianrisueo/asset-discovery-lab/blob/main/docs/development/decision-log.md"><b data-i18n="card2_t"></b><span data-i18n="card2_d"></span></a>
+        <a class="card" href="https://github.com/cristianrisueo/asset-discovery-lab/blob/main/docs/development/verification-report.md"><b data-i18n="card3_t"></b><span data-i18n="card3_d"></span></a>
+        <a class="card" href="https://github.com/cristianrisueo/asset-discovery-lab/blob/main/CHANGELOG.md"><b data-i18n="card4_t"></b><span data-i18n="card4_d"></span></a>
+      </div>
+    </section>
+
+    <footer class="site">
+      <span data-i18n="footer"></span> · <a href="https://github.com/cristianrisueo/asset-discovery-lab">cristianrisueo/asset-discovery-lab</a>
+    </footer>
+  </div>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var D = {"struct":{"nodes":[{"id":"sim","cat":"go","x":130,"y":130,"w":200},{"id":"trig","cat":"kafka","x":425,"y":130,"w":200},{"id":"adapter","cat":"go","x":720,"y":130,"w":200},{"id":"ent","cat":"kafka","x":1015,"y":130,"w":200},{"id":"proc","cat":"flink","x":1310,"y":130,"w":200},{"id":"cache","cat":"cache","x":720,"y":310,"w":200},{"id":"dlq","cat":"kafka","x":1015,"y":310,"w":200},{"id":"web","cat":"query","x":425,"y":490,"w":200},{"id":"explorer","cat":"query","x":720,"y":490,"w":200},{"id":"doris","cat":"doris","x":1310,"y":490,"w":200},{"id":"minio","cat":"lake","x":1015,"y":650,"w":200},{"id":"lake","cat":"lake","x":1310,"y":650,"w":200}],"edges":[{"id":"e1","cat":"kafka","d":"M230,130 L322,130","lx":277,"ly":117,"anchor":"middle"},{"id":"e2","cat":"kafka","d":"M525,130 L617,130","lx":571,"ly":117,"anchor":"middle"},{"id":"e3","cat":"grpc","d":"M720,96 C720,22 130,22 130,93","lx":425,"ly":32,"anchor":"middle"},{"id":"e4","cat":"cache","d":"M720,164 L720,273","lx":708,"ly":224,"anchor":"end"},{"id":"e5","cat":"kafka","d":"M820,130 L912,130","lx":866,"ly":117,"anchor":"middle"},{"id":"e6","cat":"kafka","d":"M800,164 C800,230 850,310 912,310","lx":842,"ly":238,"anchor":"start"},{"id":"e7","cat":"kafka","d":"M1115,130 L1207,130","lx":1161,"ly":117,"anchor":"middle"},{"id":"e8","cat":"kafka","d":"M1250,164 C1250,240 1180,310 1118,310","lx":1230,"ly":200,"anchor":"end"},{"id":"e9","cat":"stream","d":"M1310,164 L1310,453","lx":1322,"ly":312,"anchor":"start","info":"streamload","box":{"x":1366,"y":308,"w":90,"cat":"doris"}},{"id":"e10","cat":"query","d":"M820,490 L1207,490","lx":1013,"ly":477,"anchor":"middle","info":"flightsql","box":{"x":1013,"y":473,"w":124,"cat":"query"}},{"id":"e11","cat":"query","d":"M525,490 L617,490","lx":571,"ly":477,"anchor":"middle"},{"id":"e12","cat":"lake","d":"M1410,130 C1452,130 1452,650 1413,650","lx":1430,"ly":400,"anchor":"end"},{"id":"e13","cat":"lake","d":"M1310,524 L1310,613","lx":1298,"ly":573,"anchor":"end"},{"id":"e14","cat":"lake","d":"M1210,650 L1118,650","lx":1164,"ly":637,"anchor":"middle"}],"steps":[{"nodes":["sim","trig","adapter","ent","proc","cache","dlq","web","explorer","doris","minio","lake"],"edges":["e1","e2","e3","e4","e5","e6","e7","e8","e9","e10","e11","e12","e13","e14"],"phases":[]},{"nodes":["sim","trig"],"edges":["e1"],"phases":[[{"e":"e1","rev":false}]]},{"nodes":["trig","adapter"],"edges":["e2"],"phases":[[{"e":"e2","rev":false}]]},{"nodes":["adapter","cache"],"edges":["e4"],"phases":[[{"e":"e4","rev":false}],[{"e":"e4","rev":true}]]},{"nodes":["adapter","sim","cache"],"edges":["e3","e4"],"phases":[[{"e":"e3","rev":false}],[{"e":"e3","rev":true}],[{"e":"e4","rev":false}]]},{"nodes":["adapter","ent","dlq"],"edges":["e5","e6"],"phases":[[{"e":"e5","rev":false}]]},{"nodes":["ent","proc","dlq"],"edges":["e7","e8"],"phases":[[{"e":"e7","rev":false}]]},{"nodes":["proc","doris"],"edges":["e9"],"phases":[[{"e":"e9","rev":false}]]},{"nodes":["doris"],"edges":[],"phases":[],"startAt":"doris"},{"nodes":["proc","lake","minio"],"edges":["e12","e14"],"phases":[[{"e":"e12","rev":false}],[{"e":"e14","rev":false}]]},{"nodes":["web","explorer"],"edges":["e11"],"phases":[[{"e":"e11","rev":false}]]},{"nodes":["explorer","doris"],"edges":["e10"],"phases":[[{"e":"e10","rev":false}],[{"e":"e10","rev":true}]]},{"nodes":["explorer","doris"],"edges":["e10"],"phases":[[{"e":"e10","rev":false}],[{"e":"e10","rev":true}]]},{"nodes":["explorer","web"],"edges":["e11"],"phases":[[{"e":"e11","rev":true}]]},{"nodes":["web","explorer","doris","lake","minio"],"edges":["e11","e10","e13","e14"],"phases":[[{"e":"e11","rev":false}],[{"e":"e10","rev":false}],[{"e":"e13","rev":false}],[{"e":"e14","rev":false}],[{"e":"e14","rev":true}],[{"e":"e13","rev":true}],[{"e":"e10","rev":true}],[{"e":"e11","rev":true}]]},{"nodes":["sim","trig","adapter","ent","proc","cache","dlq","web","explorer","doris","minio","lake"],"edges":["e1","e2","e3","e4","e5","e6","e7","e8","e9","e10","e11","e12","e13","e14"],"phases":[]}]},"text":{"en":{"nodeSub":{"sim":"Go · simulated source","trig":"topic · change notices","adapter":"Go · consumer","ent":"assets · users · groups","proc":"Flink 2.1 · Java","cache":"cache","dlq":"messages that fail","web":"minimal React","explorer":"Rust · Axum","doris":"current state · views","minio":"local S3 storage","lake":"table format · history"},"edge":{"e1":"publishes","e2":"reads","e3":"GetAsset · gRPC","e4":"looks up and stores","e5":"publishes","e6":"on failure","e7":"reads","e8":"malformed","e9":"Stream Load","e10":"Arrow Flight SQL","e11":"HTTP","e12":"history","e13":"queries the lake","e14":"files"},"info":{"sim":{"title":"datacore","tech":"Go · gRPC","is":"DataCore is the central layer where each customer's inventory lives: their devices, users and groups. It is the source of truth: if you want to know how a laptop is right now, the official answer is there. Every change that happens in it is published to Kafka so the rest of the system finds out.\n\nOur datacore is a toy version, written in Go with gRPC.","what":"It stores devices, users and groups and keeps changing them on its own, as if someone were moving laptops between sites or switching a user to another group. For each change it publishes a light notice to triggers. When the adapter asks for an entity over gRPC, it returns it in full. It can also deliberately produce duplicates, stale reads and broken messages to check that everything downstream holds up."},"trig":{"title":"triggers","tech":"Kafka · topic","is":"A Kafka topic. Kafka is a messaging system that keeps messages in order, in logs that can be read again; a topic is one of those logs, with its own name. Whoever writes does not wait for whoever reads: each goes at its own pace. Messages with the same key land in the same partition and are read in the order they arrived.","what":"It receives one notice for each change in datacore. The notice is light: it only says what changed (type, ID, version and time), without the entity itself. The key is the type plus the ID, so all changes of the same device are read in order. If the adapter goes down, the notices wait here until it comes back."},"adapter":{"title":"adapter","tech":"Go · gRPC","is":"A Go service that adapts what DataCore publishes to what the pipeline needs: light notices carrying only an ID come in, and full entities go out, one topic per type.","what":"It reads each notice from triggers and looks in the cache first. If the device is not there, it requests it in full from datacore over gRPC, with a deadline and retries, and stores it in the cache. Then it publishes it to the topic of its type and only then marks the notice as processed: if it crashes midway, it reprocesses on return.\n\nIf the device was already in the cache, it takes it from there and publishes anyway. Whatever it cannot resolve goes to dlq.adapter together with the reason."},"ent":{"title":"entities.*","tech":"Kafka · one topic per type","is":"Three Kafka topics, one per entity type: devices, users and groups. They are compacted topics: Kafka keeps at least the latest version of each key, so re-reading them from the start rebuilds the full state.","what":"They carry the complete, ready-to-process entities from the adapter to Flink. The same version can arrive twice, because delivery is at-least-once: filtering it out is the processor's job."},"proc":{"title":"processor","tech":"Flink 2.1 · Java","is":"Apache Flink, an engine for processing data that never stops arriving. Picture an assembly line that never halts: messages come in at one end, pass through workstations and leave at the other. The workers carry notebooks, so they remember things between one message and the next (the state), and a photographer takes periodic photos of the whole line (the checkpoints): if something breaks, it is rebuilt exactly as it was in the last photo.\n\nA job is the program you write with Flink, in Java, and which keeps running non-stop on the cluster: the JobManager coordinates it and the TaskManagers execute it in parallel.","what":"It reads the entities from the three topics and remembers the latest version it has seen of each one: if a repeated or older one arrives, it discards it. What it cannot read goes to dlq.processor. The rest goes to two destinations, both tied to their checkpoints so that nothing is lost and nothing enters twice: Doris, in batches, with the current state, and Iceberg, with every change for the history. It also counts changes per minute."},"cache":{"title":"Dragonfly","tech":"In-memory cache","is":"An in-memory store compatible with Redis: same clients and same commands. Its advantage is that it uses all the cores of the machine, whereas Redis runs each instance's commands on a single thread, so on one machine it usually gives more throughput. In exchange it is younger, with a smaller ecosystem, and its license (DSAL) is not open source, although it is free for development and for almost any production use.","what":"It stores the entities the adapter has already requested, by type, ID and version. When a repeated notice arrives, which is normal with Kafka, the adapter finds the entity here and does not call datacore again. It does not discard notices: it only saves calls."},"dlq":{"title":"dlq.*","tech":"Kafka · failure queues","is":"Failure queues (dead letter queues): Kafka topics where messages that could not be processed are set aside, together with the reason.","what":"There is one per consumer: dlq.adapter for the notices the adapter could not resolve and dlq.processor for the messages Flink could not read. That way a broken message neither blocks the ones behind it nor gets lost: it stays stored to be reviewed or reprocessed."},"web":{"title":"web","tech":"React","is":"A minimal page built with React.","what":"It asks the explorer for data over HTTP and displays it: a device's details card with its user and group, its change history and the counts by operating system and site. It lets you see with your own eyes that a change in datacore shows up within seconds. It never talks to Doris directly."},"explorer":{"title":"explorer","tech":"Rust · Axum","is":"A Rust API built with Axum, a framework for HTTP APIs: the equivalent of what you would use in Go to set up a router and its handlers. It runs on Tokio, Rust's concurrency engine, which plays the role of goroutines.","what":"It is the front door to the data. It receives the web's requests, translates them to SQL, queries Doris over Arrow Flight SQL and returns the result as JSON. That way the database is never exposed to the browser, and the web gets a stable contract even if the tables change."},"doris":{"title":"Doris","tech":"Analytical database","is":"An analytical database that stores data by columns: all operating systems together, all sites together. To count devices per site it reads only that column, not the whole table. It has its own engine, but it speaks the MySQL protocol, so you query it with ordinary SQL.\n\nIt does not modify rows in place: it writes the new version and marks the old one as deleted. That is why it prefers to receive data in batches.","what":"It stores the current state of every device, user and group: one row per entity, which uses the version so that an old one never overwrites a new one. On top it has a view that joins each device with its user and group, and a materialized view with counts by operating system and site. When the history is requested, it reads it from the lake through the Iceberg catalog. It answers the explorer over Arrow Flight SQL."},"minio":{"title":"RustFS","tech":"S3 storage · Rust","is":"An object store that runs in a container and speaks exactly the same language as Amazon S3: files kept in buckets, reached by their path over HTTP. Any program prepared for S3 works with RustFS without changing code. It is written in Rust, licensed under Apache 2.0, and works offline.\n\nIt takes the place MinIO used to have, whose open-source project is archived and no longer publishes Docker images.","what":"It is the lake's disk. It stores the Parquet files with the changes and Iceberg's metadata files, for example lake/inventory/asset_changes/data/… and …/metadata/v38.metadata.json."},"lake":{"title":"Iceberg","tech":"Table format · REST catalog","is":"It is not a database but an open table format: the standard on which a lakehouse is built. The data are files in S3, and Iceberg adds a catalog that says which files make up the table at any moment. With that, writes are all-or-nothing, each change creates a new version without deleting the previous ones, and any engine can read the same table. It was created at Netflix.","what":"It stores the complete history: every change of every device, without replacing earlier ones. Flink appends the changes and, at each checkpoint, commits to the catalog, which then points to a new version of the table. Doris reads from here when someone asks for the history."},"streamload":{"title":"Stream Load","tech":"Doris · batch loading","is":"The way to load data into Doris in batches, with one HTTP request. The batch goes in the body, as CSV, JSON or Arrow, and the request carries a unique label. Doris loads the whole batch as a single transaction: either everything gets in or nothing does. If the same label arrives twice, it rejects the second, so a retry never duplicates data.","what":"Used by the Flink connector for Doris, in two phases. While changes arrive, it keeps sending them to an open, unconfirmed load. When Flink completes a checkpoint, it confirms the load and the data appears. If Flink goes down before that, the half-done load is discarded and repeated from the last checkpoint.\n\nIn a real deployment, batches are usually sent in Arrow format and compressed with ZSTD, so nothing has to be converted and less data is sent."},"flightsql":{"title":"Arrow Flight SQL","tech":"Columnar connection","is":"Three layers, one on top of another. Arrow is a standard format for holding data in memory by columns, the same in Rust, in Java or in Doris. Flight sends Arrow data over the network and is built on gRPC. Flight SQL adds what is needed to talk to a database: connect, send SQL and receive the result.\n\nThe alternative, the MySQL protocol, sends results row by row and as text.","what":"It joins the explorer with Doris. The explorer sends the SQL and Doris returns a ticket, a kind of claim slip. With the ticket, the explorer collects the results as blocks of columns, just as Doris stores them, with no conversions along the way. With large results, that is the difference that matters."}},"steps":[{"title":"The complete map","text":"Twelve components. Press Next to follow LT-0042's change from end to end and see how the data is transformed at each step. You can also tap any component, or the Stream Load and Arrow Flight SQL labels, to see what it is and what it does.","code":""},{"title":"1 · Something changes at the source","text":"A service outside the lab detects that LT-0042 is now on the Madrid network and notifies datacore. datacore records it with its business logic, raises the device's version from 6 to 7 and publishes a notice to triggers. The notice only says what changed: the entity type, the ID, the version and when it happened. It does not carry the device.","code":"datacore · inventory\nLT-0042   site: Alicante → Madrid   version: 6 → 7\n\ndatacore publishes to triggers\nkey:   asset:LT-0042\nvalue: Trigger {\n  entity_type: ENTITY_TYPE_ASSET\n  entity_id:   \"LT-0042\"\n  version:     7\n  changed_at:  2026-11-25T10:14:03.120Z\n}"},{"title":"2 · The adapter receives the notice","text":"The adapter is subscribed to triggers with its consumer group. Kafka hands it the notice together with the partition and the position (the offset) where it is stored. Since the key is asset:LT-0042, all changes of that laptop land in the same partition and arrive in order.","code":"topic: triggers   partition: 1   offset: 18342\nkey:   asset:LT-0042\nvalue: Trigger {\n  entity_type: ENTITY_TYPE_ASSET\n  entity_id:   \"LT-0042\"\n  version:     7\n  changed_at:  2026-11-25T10:14:03.120Z\n}"},{"title":"3 · It checks the cache first","text":"Before bothering datacore, the adapter asks Dragonfly for the full device at that version. It is not there, because this is the first time it sees version 7. If it were there, for example because of a repeated notice, it would take it from there and continue the flow anyway: the cache saves the call, it does not discard the notice.","code":"Dragonfly\n> GET entity:asset:LT-0042:v7\n(nil)          not there: it must be requested from datacore"},{"title":"4 · It requests the device over gRPC and stores it in the cache","text":"It calls GetAsset with a 500 ms deadline and up to three retries. datacore returns the full device as it is now. Before publishing it, the adapter stores it in Dragonfly with an expiry, so that if the same notice arrives again, nobody needs to be called.","code":"→ GetAssetRequest { id: \"LT-0042\" }\n\n← GetAssetResponse {\n    asset {\n      id: \"LT-0042\"\n      hostname: \"lt-0042.acme.local\"\n      os: \"Windows 11\"\n      site: \"Madrid\"\n      owner_user_id: \"U-0117\"\n      version: 7\n      changed_at: 2026-11-25T10:14:03.120Z\n    }\n  }\n\nDragonfly\n> SET entity:asset:LT-0042:v7 \u003cdevice as bytes> EX 3600\nOK"},{"title":"5 · It publishes to the topic of its type","text":"Since it is a device, it publishes it to entities.assets, with its ID as the key. Only afterwards does it confirm to Kafka that it processed the notice (it commits the offset). If it crashed between one thing and the other, on return it would reprocess the notice and publish again: a harmless duplicate that the next step will filter out. If it could not resolve the notice, it would send it to dlq.adapter with the reason.","code":"topic: entities.assets   key: LT-0042\nvalue: Asset {\n  id: \"LT-0042\"   hostname: \"lt-0042.acme.local\"\n  os: \"Windows 11\"   site: \"Madrid\"   owner_user_id: \"U-0117\"\n  version: 7   changed_at: 2026-11-25T10:14:03.120Z\n}\n\nafterwards:    commit on triggers · partition 1 · offset 18343\nif it failed:  dlq.adapter · header error = \"NOT_FOUND\""},{"title":"6 · Flink discards the old and the repeated","text":"The processor is a Flink job. It reads the message from entities.assets, turns it into an Asset object and checks its notebook: the latest version it saw of LT-0042 was 6. 7 is greater, so it writes it down and lets it through. If 7 arrived again later, or a late 5, it would discard it. What it cannot read goes to dlq.processor.","code":"input      Asset{id: \"LT-0042\", site: \"Madrid\", version: 7}\nnotebook   lastVersion[\"asset:LT-0042\"] = 6\ndecision   7 > 6   →   passes, and the notebook now says 7\noutput     Asset{id: \"LT-0042\", site: \"Madrid\", version: 7}\n\nif 7 arrives again:    7 > 7 is false   →   discarded\nif a late 5 arrives:   5 > 7 is false   →   discarded"},{"title":"7 · It writes to Doris without duplicating","text":"Flink does not write each change separately: it groups it with the others into a batch and sends it to Doris with Stream Load, with a unique label. The load is confirmed when Flink completes its checkpoint; if it went down before, it would be discarded and repeated. At the same time, it adds the change to the per-minute count. In the example the batch is JSON so it reads well; a real deployment would send it in Arrow and compressed.","code":"PUT /api/inventory/assets/_stream_load\nlabel: flink-assets-ckpt-42   format: json   two_phase_commit: true\n\n{\"id\":\"LT-0042\",\"hostname\":\"lt-0042.acme.local\",\"os\":\"Windows 11\",\"site\":\"Madrid\",\"owner_user_id\":\"U-0117\",\"version\":7,\"changed_at\":\"2026-11-25 10:14:03.120\"}\n… and the rest of the batch's changes\n\ncheckpoint 42 completed   →   load committed   →   visible in Doris\n\nchange_rate_1m   ←   10:14 · asset · 312 changes"},{"title":"8 · Doris stores the current state","text":"LT-0042's row now says Madrid and version 7. Doris does not edit it in place: it writes the new version and marks the old one as deleted. Since the sequence column is the version, a late 5 could never overwrite the 7. The materialized view recomputes the counts: one device fewer in Alicante and one more in Madrid.","code":"assets · before\nid        site       os           owner_user_id   version\nLT-0042   Alicante   Windows 11   U-0117          6\n\nassets · after\nid        site       os           owner_user_id   version\nLT-0042   Madrid     Windows 11   U-0117          7\n\nmv_assets_by_os_site\nos           site       assets\nWindows 11   Alicante   41 → 40\nWindows 11   Madrid     57 → 58"},{"title":"9 · Flink stores the change in the lake","text":"At the same time as it writes to Doris, the processor appends the change to Iceberg's asset_changes table. The data goes to Parquet files in RustFS and, when the checkpoint completes, Flink commits to the catalog: the table moves to a new version that includes the change. Unlike Doris, nothing is replaced here: version 6 is still there, next to 7.","code":"row appended to lake.inventory.asset_changes\nid: LT-0042   site: Madrid   os: Windows 11   version: 7   changed_at: 2026-11-25 10:14:03\n\nRustFS\nlake/inventory/asset_changes/data/00012-….parquet         ← new files, with LT-0042 v7\nlake/inventory/asset_changes/metadata/v38.metadata.json   ← new table version\n\nREST catalog · checkpoint 42\nasset_changes: v37 → v38   (v37 is still available)"},{"title":"10 · The web asks for LT-0042's details","text":"Someone opens the laptop's details in the web app. The React page makes an HTTP request to the explorer. It never talks to Doris directly: the database is not exposed to the browser.","code":"GET /api/assets/LT-0042 HTTP/1.1\nHost: explorer:8080\nAccept: application/json"},{"title":"11 · The explorer asks Doris","text":"Axum receives the request, sees it matches the route /api/assets/{id}, extracts LT-0042 from the URL and calls its handler. The handler translates the request to SQL on the view that joins device, user and group, and sends it to Doris over Arrow Flight SQL. Doris runs the query and returns a ticket to collect the result.","code":"Axum: GET /api/assets/{id}   →   get_asset(id = \"LT-0042\")\n\nFlight SQL · query\nSELECT id, hostname, os, site, owner_name, group_name\nFROM v_assets_enriched\nWHERE id = 'LT-0042'\n\n← FlightInfo { ticket: \"a91f…\" }"},{"title":"12 · Doris answers in columns","text":"With the ticket, the explorer asks for the result and Doris sends it as Arrow blocks: column by column, just as it has them stored, without converting anything to text along the way. Here it is a single row, but with thousands of rows is where the difference shows.","code":"→ DoGet(ticket \"a91f…\")\n\n← RecordBatch · 1 row · 6 columns\n  id           [\"LT-0042\"]\n  hostname     [\"lt-0042.acme.local\"]\n  os           [\"Windows 11\"]\n  site         [\"Madrid\"]\n  owner_name   [\"Ana Ruiz\"]\n  group_name   [\"Sales\"]"},{"title":"13 · The web shows LT-0042 in Madrid","text":"The explorer turns the Arrow blocks into JSON and Axum returns them to the web, which draws the details: LT-0042 is in Madrid, belongs to Ana Ruiz and is in the Sales group. A few seconds have passed since the change in datacore.","code":"HTTP/1.1 200 OK\nContent-Type: application/json\n\n{\n  \"id\": \"LT-0042\",\n  \"hostname\": \"lt-0042.acme.local\",\n  \"os\": \"Windows 11\",\n  \"site\": \"Madrid\",\n  \"owner\": { \"name\": \"Ana Ruiz\", \"group\": \"Sales\" }\n}"},{"title":"14 · The web asks for the history","text":"In the details, someone presses History. The explorer sends the SQL to Doris as usual, but this time the table belongs to the lake: Doris asks Iceberg's catalog which files make up asset_changes, reads them from RustFS and returns the rows to the explorer, which answers in JSON. For the web nothing changes; inside, the recent comes from Doris and the old from the lake.","code":"GET /api/assets/LT-0042/history\n\nFlight SQL · query\nSELECT version, site, changed_at\nFROM lake.inventory.asset_changes\nWHERE id = 'LT-0042'\nORDER BY version\n\nDoris  →  Iceberg catalog: asset_changes v38  →  reads the Parquet files from RustFS\n\nversion   site       changed_at\n6         Alicante   2026-10-02 09:41\n7         Madrid     2026-11-25 10:14\n\n← [{\"version\":6,\"site\":\"Alicante\"},{\"version\":7,\"site\":\"Madrid\"}]"},{"title":"Summary","text":"A change in datacore travels as a notice, the adapter completes it over gRPC, Flink filters it and writes it to Doris in batches and to Iceberg for the history, and the web sees it within seconds through the explorer. Every problem has its safety net: the cache saves calls, Flink's state and the sequence column stop old versions, Stream Load labels and checkpoint commits prevent duplicates, and the failure queues keep what is broken.","code":""}]},"es":{"nodeSub":{"sim":"Go · origen simulado","trig":"topic · avisos de cambio","adapter":"Go · consumidor","ent":"assets · users · groups","proc":"Flink 2.1 · Java","cache":"caché","dlq":"mensajes que fallan","web":"React mínima","explorer":"Rust · Axum","doris":"estado actual · vistas","minio":"almacenamiento S3 local","lake":"formato de tablas · histórico"},"info":{"sim":{"title":"datacore","tech":"Go · gRPC","is":"DataCore es la capa central donde vive el inventario de cada cliente: sus equipos, sus usuarios y sus grupos. Es la fuente de verdad: si quieres saber cómo está ahora un portátil, la respuesta oficial está ahí. Cada cambio que ocurre en ella se publica en Kafka para que el resto del sistema se entere.\n\nNuestro datacore es una versión de juguete, en Go y con gRPC.","what":"Guarda equipos, usuarios y grupos y los va cambiando solo, como si alguien moviera portátiles de sede o cambiara a un usuario de grupo. Por cada cambio publica un aviso ligero en triggers. Cuando el adapter le pide una entidad por gRPC, se la da completa. Además, puede provocar a propósito duplicados, lecturas desfasadas y mensajes rotos para comprobar que el resto aguanta."},"trig":{"title":"triggers","tech":"Kafka · topic","is":"Un topic de Kafka. Kafka es un sistema de mensajería que guarda los mensajes en orden, en registros que se pueden volver a leer; un topic es uno de esos registros, con nombre propio. Quien escribe no espera a quien lee: cada uno va a su ritmo. Los mensajes con la misma clave caen en la misma partición y se leen en el orden en que llegaron.","what":"Recibe un aviso por cada cambio en datacore. El aviso es ligero: solo dice qué ha cambiado (tipo, ID, versión y fecha), sin la entidad. La clave es el tipo y el ID, así que todos los cambios de un mismo equipo se leen en orden. Si el adapter se cae, los avisos esperan aquí hasta que vuelva."},"adapter":{"title":"adapter","tech":"Go · gRPC","is":"Un servicio en Go que adapta lo que publica DataCore a lo que necesita el pipeline: entran avisos ligeros con solo el ID y salen entidades completas, una por topic según su tipo.","what":"Lee cada aviso de triggers y mira primero en la caché. Si el equipo no está, lo pide entero a datacore por gRPC, con un tiempo máximo y reintentos, y lo guarda en la caché. Después lo publica en el topic de su tipo y solo entonces da el aviso por procesado: si se cae a mitad, al volver lo reprocesa.\n\nSi el equipo ya estaba en la caché, lo coge de ahí y publica igualmente. Lo que no consigue resolver lo aparta a dlq.adapter con el motivo."},"ent":{"title":"entities.*","tech":"Kafka · un topic por tipo","is":"Tres topics de Kafka, uno por tipo de entidad: equipos, usuarios y grupos. Son topics compactados: Kafka guarda, como mínimo, la última versión de cada clave, así que releerlos desde el principio permite reconstruir el estado completo.","what":"Llevan las entidades completas, ya listas para procesar, del adapter hasta Flink. Puede llegar la misma versión dos veces, porque la entrega es at-least-once: de filtrarla se encarga el processor."},"proc":{"title":"processor","tech":"Flink 2.1 · Java","is":"Apache Flink, un motor para procesar datos que no paran de llegar. Imagina una cadena de montaje que nunca se detiene: los mensajes entran por un lado, pasan por puestos de trabajo y salen por el otro. Los trabajadores tienen libreta, así que recuerdan cosas entre un mensaje y otro (el estado), y un fotógrafo hace fotos periódicas de toda la cadena (los checkpoints): si algo se rompe, se reconstruye exactamente como estaba en la última foto.\n\nUn job es el programa que escribes con Flink, en Java, y que se queda funcionando sin parar en el clúster: el JobManager lo coordina y los TaskManagers lo ejecutan en paralelo.","what":"Lee las entidades de los tres topics y recuerda la última versión que ha visto de cada una: si llega una repetida o más vieja, la descarta. Lo que no puede leer lo aparta a dlq.processor. El resto va a dos destinos, los dos ligados a sus checkpoints para que nada se pierda ni entre dos veces: Doris, por lotes, con el estado actual, e Iceberg, con cada cambio para el histórico. Además, cuenta los cambios por minuto."},"cache":{"title":"Dragonfly","tech":"Caché en memoria","is":"Un almacén en memoria compatible con Redis: mismos clientes y mismos comandos. Su ventaja es que usa todos los núcleos de la máquina, mientras que Redis procesa los comandos de cada instancia en un solo hilo, así que con una sola máquina suele dar más rendimiento. A cambio es más joven, con menos ecosistema, y su licencia (DSAL) no es de código abierto, aunque es gratis para desarrollo y para casi cualquier uso en producción.","what":"Guarda las entidades que el adapter ya ha pedido, por tipo, ID y versión. Cuando llega un aviso repetido, algo normal con Kafka, el adapter encuentra la entidad aquí y no vuelve a llamar a datacore. No descarta avisos: solo ahorra llamadas."},"dlq":{"title":"dlq.*","tech":"Kafka · colas de fallos","is":"Colas de fallos (dead letter queues): topics de Kafka donde se apartan los mensajes que no se han podido procesar, junto con el motivo.","what":"Hay una por consumidor: dlq.adapter para los avisos que el adapter no pudo resolver y dlq.processor para los mensajes que Flink no pudo leer. Así un mensaje roto no bloquea a los que vienen detrás ni se pierde: queda guardado para revisarlo o reprocesarlo."},"web":{"title":"web","tech":"React","is":"Una página mínima hecha con React.","what":"Pide los datos al explorer por HTTP y los muestra: la ficha de un equipo con su usuario y su grupo, su historial de cambios y los recuentos por sistema operativo y sede. Sirve para ver con tus ojos que un cambio en datacore aparece en segundos. Nunca habla con Doris directamente."},"explorer":{"title":"explorer","tech":"Rust · Axum","is":"Una API en Rust hecha con Axum, un framework para APIs HTTP: el equivalente a lo que usas en Go para montar un router y sus handlers. Funciona sobre Tokio, el motor de concurrencia de Rust, que cumple el papel de las goroutines.","what":"Es la puerta de entrada a los datos. Recibe las peticiones de la web, las traduce a SQL, consulta Doris por Arrow Flight SQL y devuelve el resultado en JSON. Así la base de datos nunca queda expuesta al navegador, y la web tiene un contrato estable aunque cambien las tablas."},"doris":{"title":"Doris","tech":"Base de datos analítica","is":"Una base de datos analítica que guarda por columnas: todos los sistemas operativos juntos, todas las sedes juntas. Para contar equipos por sede solo lee esa columna, no la tabla entera. Tiene su propio motor, pero habla el protocolo de MySQL, así que se le pregunta con SQL normal.\n\nNo modifica las filas en su sitio: escribe la versión nueva y marca la vieja como borrada. Por eso prefiere recibir los datos por lotes.","what":"Guarda el estado actual de cada equipo, usuario y grupo: una fila por entidad, que usa la versión para que una vieja nunca pise a una nueva. Encima tiene una vista que une cada equipo con su usuario y su grupo, y una vista materializada con los recuentos por sistema operativo y sede. Cuando le piden el histórico, lo lee del lago a través del catálogo de Iceberg. Responde al explorer por Arrow Flight SQL."},"minio":{"title":"RustFS","tech":"Almacenamiento S3 · Rust","is":"Un almacenamiento de objetos que corre en un contenedor y habla exactamente el mismo idioma que Amazon S3: ficheros guardados en buckets, a los que se accede por su ruta a través de HTTP. Cualquier programa preparado para S3 funciona con RustFS sin cambiar el código. Está escrito en Rust, tiene licencia Apache 2.0 y funciona sin conexión.\n\nOcupa el sitio que antes tenía MinIO, cuyo proyecto libre está archivado y ya no publica imágenes de Docker.","what":"Es el disco del lago. Guarda los ficheros Parquet con los cambios y los ficheros de metadatos de Iceberg, por ejemplo lake/inventory/asset_changes/data/… y …/metadata/v38.metadata.json."},"lake":{"title":"Iceberg","tech":"Formato de tablas · catálogo REST","is":"No es una base de datos, sino un formato abierto de tablas: el estándar sobre el que se monta un lakehouse. Los datos son ficheros en S3, e Iceberg añade un catálogo que dice qué ficheros forman la tabla en cada momento. Con eso, las escrituras son de todo o nada, cada cambio crea una versión nueva sin borrar las anteriores y cualquier motor puede leer la misma tabla. Lo creó Netflix.","what":"Guarda el histórico completo: cada cambio de cada equipo, sin sustituir los anteriores. Flink añade los cambios y, en cada checkpoint, hace commit en el catálogo, que pasa a apuntar a una versión nueva de la tabla. Doris lee de aquí cuando alguien pide el historial."},"streamload":{"title":"Stream Load","tech":"Doris · carga por lotes","is":"La forma de cargar datos en Doris por lotes, con una petición HTTP. El lote va en el cuerpo, en CSV, JSON o Arrow, y la petición lleva una etiqueta única. Doris carga el lote entero como una sola transacción: o entra todo o no entra nada. Si llega dos veces la misma etiqueta, rechaza la segunda, así que un reintento nunca duplica datos.","what":"Lo usa el conector de Flink para Doris, en dos fases. Mientras llegan cambios, los va mandando a una carga abierta sin confirmar. Cuando Flink completa un checkpoint, confirma la carga y los datos aparecen. Si Flink se cae antes, la carga a medias se descarta y se repite desde el último checkpoint.\n\nEn un despliegue real, los lotes se suelen mandar en formato Arrow y comprimidos con ZSTD, para no convertir nada y enviar menos datos."},"flightsql":{"title":"Arrow Flight SQL","tech":"Conexión por columnas","is":"Tres capas, una encima de otra. Arrow es un formato estándar para tener datos en memoria por columnas, igual en Rust, en Java o en Doris. Flight envía datos Arrow por la red y está construido sobre gRPC. Flight SQL añade lo necesario para hablar con una base de datos: conectarse, mandar SQL y recibir el resultado.\n\nLa alternativa, el protocolo de MySQL, manda los resultados fila a fila y en texto.","what":"Une el explorer con Doris. El explorer manda el SQL y Doris le devuelve un ticket, una especie de resguardo. Con el ticket, el explorer recoge los resultados como bloques de columnas, tal y como los guarda Doris, sin conversiones por el camino. Con resultados grandes, esa es la diferencia que importa."}},"edge":{"e1":"publica","e2":"lee","e3":"GetAsset · gRPC","e4":"consulta y guarda","e5":"publica","e6":"si falla","e7":"lee","e8":"mal formado","e9":"Stream Load","e10":"Arrow Flight SQL","e11":"HTTP","e12":"histórico","e13":"consulta el lago","e14":"ficheros"},"steps":[{"title":"El mapa completo","text":"Doce piezas. Pulsa Siguiente para seguir el cambio de LT-0042 de punta a punta y ver cómo se transforma el dato en cada paso. También puedes tocar cualquier pieza, o las etiquetas Stream Load y Arrow Flight SQL, para ver qué es y qué hace.","code":""},{"title":"1 · Algo cambia en el origen","text":"Un servicio que queda fuera del lab detecta que LT-0042 está ahora en la red de Madrid y se lo notifica a datacore. datacore lo registra con su lógica de negocio, sube la versión del equipo de 6 a 7 y publica un aviso en triggers. El aviso solo dice qué ha cambiado: el tipo de entidad, el ID, la versión y cuándo ocurrió. No lleva el equipo.","code":"datacore · inventario\nLT-0042   site: Alicante → Madrid   version: 6 → 7\n\ndatacore publica en triggers\nclave: asset:LT-0042\nvalor: Trigger {\n  entity_type: ENTITY_TYPE_ASSET\n  entity_id:   \"LT-0042\"\n  version:     7\n  changed_at:  2026-11-25T10:14:03.120Z\n}"},{"title":"2 · El adapter recibe el aviso","text":"El adapter está suscrito a triggers con su consumer group. Kafka le entrega el aviso junto con la partición y la posición (el offset) en la que está guardado. Como la clave es asset:LT-0042, todos los cambios de ese portátil caen en la misma partición y llegan en orden.","code":"topic: triggers   partición: 1   offset: 18342\nclave: asset:LT-0042\nvalor: Trigger {\n  entity_type: ENTITY_TYPE_ASSET\n  entity_id:   \"LT-0042\"\n  version:     7\n  changed_at:  2026-11-25T10:14:03.120Z\n}"},{"title":"3 · Primero mira la caché","text":"Antes de molestar a datacore, el adapter pregunta a Dragonfly por el equipo completo en esa versión. No está, porque es la primera vez que ve la versión 7. Si estuviera, por ejemplo por un aviso repetido, lo cogería de ahí y seguiría el flujo igualmente: la caché ahorra la llamada, no descarta el aviso.","code":"Dragonfly\n> GET entity:asset:LT-0042:v7\n(nil)          no está: hay que pedírselo a datacore"},{"title":"4 · Pide el equipo por gRPC y lo guarda en la caché","text":"Llama a GetAsset con un plazo máximo de 500 ms y hasta tres reintentos. datacore le devuelve el equipo completo tal y como está ahora. Antes de publicarlo, el adapter lo guarda en Dragonfly con una caducidad, para que, si vuelve a llegar el mismo aviso, no haga falta llamar a nadie.","code":"→ GetAssetRequest { id: \"LT-0042\" }\n\n← GetAssetResponse {\n    asset {\n      id: \"LT-0042\"\n      hostname: \"lt-0042.acme.local\"\n      os: \"Windows 11\"\n      site: \"Madrid\"\n      owner_user_id: \"U-0117\"\n      version: 7\n      changed_at: 2026-11-25T10:14:03.120Z\n    }\n  }\n\nDragonfly\n> SET entity:asset:LT-0042:v7 \u003cequipo en bytes> EX 3600\nOK"},{"title":"5 · Lo publica en el topic de su tipo","text":"Como es un equipo, lo publica en entities.assets, con su ID como clave. Solo después confirma a Kafka que ha procesado el aviso (hace commit del offset). Si se cayera entre una cosa y otra, al volver reprocesaría el aviso y publicaría otra vez: un duplicado inofensivo que filtrará el siguiente paso. Si no pudiera resolver el aviso, lo mandaría a dlq.adapter con el motivo.","code":"topic: entities.assets   clave: LT-0042\nvalor: Asset {\n  id: \"LT-0042\"   hostname: \"lt-0042.acme.local\"\n  os: \"Windows 11\"   site: \"Madrid\"   owner_user_id: \"U-0117\"\n  version: 7   changed_at: 2026-11-25T10:14:03.120Z\n}\n\ndespués:     commit en triggers · partición 1 · offset 18343\nsi fallara:  dlq.adapter · cabecera error = \"NOT_FOUND\""},{"title":"6 · Flink descarta lo viejo y lo repetido","text":"El processor es un job de Flink. Lee el mensaje de entities.assets, lo convierte en un objeto Asset y mira su libreta: la última versión que vio de LT-0042 era la 6. La 7 es mayor, así que la apunta y la deja pasar. Si después llegara otra vez la 7, o una 5 atrasada, la descartaría. Lo que no puede leer lo aparta a dlq.processor.","code":"entrada    Asset{id: \"LT-0042\", site: \"Madrid\", version: 7}\nlibreta    lastVersion[\"asset:LT-0042\"] = 6\ndecisión   7 > 6   →   pasa, y la libreta se queda en 7\nsalida     Asset{id: \"LT-0042\", site: \"Madrid\", version: 7}\n\nsi llega otra vez la 7:    7 > 7 es falso   →   descartada\nsi llega una 5 atrasada:   5 > 7 es falso   →   descartada"},{"title":"7 · Escribe en Doris sin duplicar","text":"Flink no escribe cada cambio por separado: lo junta con los demás en un lote y lo envía a Doris con Stream Load, con una etiqueta única. La carga se confirma cuando Flink completa su checkpoint; si se cayera antes, se descartaría y se repetiría. A la vez, suma el cambio al recuento por minuto. En el ejemplo el lote va en JSON para que se lea bien; un despliegue real lo mandaría en Arrow y comprimido.","code":"PUT /api/inventory/assets/_stream_load\nlabel: flink-assets-ckpt-42   format: json   two_phase_commit: true\n\n{\"id\":\"LT-0042\",\"hostname\":\"lt-0042.acme.local\",\"os\":\"Windows 11\",\"site\":\"Madrid\",\"owner_user_id\":\"U-0117\",\"version\":7,\"changed_at\":\"2026-11-25 10:14:03.120\"}\n… y el resto de cambios del lote\n\ncheckpoint 42 completado   →   commit de la carga   →   visible en Doris\n\nchange_rate_1m   ←   10:14 · asset · 312 cambios"},{"title":"8 · Doris guarda el estado actual","text":"La fila de LT-0042 pasa a decir Madrid y versión 7. Doris no la edita en su sitio: escribe la versión nueva y marca la vieja como borrada. Como la columna de secuencia es la versión, una 5 atrasada nunca podría pisar a la 7. La vista materializada recalcula los recuentos: un equipo menos en Alicante y uno más en Madrid.","code":"assets · antes\nid        site       os           owner_user_id   version\nLT-0042   Alicante   Windows 11   U-0117          6\n\nassets · después\nid        site       os           owner_user_id   version\nLT-0042   Madrid     Windows 11   U-0117          7\n\nmv_assets_by_os_site\nos           site       assets\nWindows 11   Alicante   41 → 40\nWindows 11   Madrid     57 → 58"},{"title":"9 · Flink guarda el cambio en el lago","text":"A la vez que escribe en Doris, el processor añade el cambio a la tabla asset_changes de Iceberg. Los datos van a ficheros Parquet en RustFS y, al completar el checkpoint, Flink hace commit en el catálogo: la tabla pasa a una versión nueva que incluye el cambio. A diferencia de Doris, aquí no se sustituye nada: la versión 6 sigue ahí, junto a la 7.","code":"fila añadida a lake.inventory.asset_changes\nid: LT-0042   site: Madrid   os: Windows 11   version: 7   changed_at: 2026-11-25 10:14:03\n\nRustFS\nlake/inventory/asset_changes/data/00012-….parquet         ← ficheros nuevos, con LT-0042 v7\nlake/inventory/asset_changes/metadata/v38.metadata.json   ← versión nueva de la tabla\n\ncatálogo REST · checkpoint 42\nasset_changes: v37 → v38   (la v37 sigue disponible)"},{"title":"10 · La web pide la ficha de LT-0042","text":"Alguien abre la ficha del portátil en la web. La página en React hace una petición HTTP al explorer. Nunca habla con Doris directamente: la base de datos no se expone al navegador.","code":"GET /api/assets/LT-0042 HTTP/1.1\nHost: explorer:8080\nAccept: application/json"},{"title":"11 · explorer pregunta a Doris","text":"Axum recibe la petición, ve que encaja con la ruta /api/assets/{id}, extrae LT-0042 de la URL y llama a su handler. El handler traduce la petición a SQL sobre la vista que une equipo, usuario y grupo, y se la manda a Doris por Arrow Flight SQL. Doris ejecuta la consulta y le devuelve un ticket para recoger el resultado.","code":"Axum: GET /api/assets/{id}   →   get_asset(id = \"LT-0042\")\n\nFlight SQL · consulta\nSELECT id, hostname, os, site, owner_name, group_name\nFROM v_assets_enriched\nWHERE id = 'LT-0042'\n\n← FlightInfo { ticket: \"a91f…\" }"},{"title":"12 · Doris responde en columnas","text":"Con el ticket, el explorer pide el resultado y Doris se lo envía como bloques Arrow: columna a columna, tal y como los tiene guardados, sin convertir nada a texto por el camino. Aquí es una sola fila, pero con miles de filas es donde se nota la diferencia.","code":"→ DoGet(ticket \"a91f…\")\n\n← RecordBatch · 1 fila · 6 columnas\n  id           [\"LT-0042\"]\n  hostname     [\"lt-0042.acme.local\"]\n  os           [\"Windows 11\"]\n  site         [\"Madrid\"]\n  owner_name   [\"Ana Ruiz\"]\n  group_name   [\"Ventas\"]"},{"title":"13 · La web muestra LT-0042 en Madrid","text":"El explorer convierte los bloques Arrow en JSON y Axum se lo devuelve a la web, que pinta la ficha: LT-0042 está en Madrid, es de Ana Ruiz y pertenece al grupo Ventas. Desde el cambio en datacore han pasado unos segundos.","code":"HTTP/1.1 200 OK\nContent-Type: application/json\n\n{\n  \"id\": \"LT-0042\",\n  \"hostname\": \"lt-0042.acme.local\",\n  \"os\": \"Windows 11\",\n  \"site\": \"Madrid\",\n  \"owner\": { \"name\": \"Ana Ruiz\", \"group\": \"Ventas\" }\n}"},{"title":"14 · La web pide el historial","text":"En la ficha, alguien pulsa Historial. El explorer manda el SQL a Doris como siempre, pero esta vez la tabla es del lago: Doris pregunta al catálogo de Iceberg qué ficheros forman asset_changes, los lee de RustFS y devuelve las filas al explorer, que responde en JSON. Para la web no cambia nada; por dentro, lo reciente sale de Doris y lo antiguo, del lago.","code":"GET /api/assets/LT-0042/history\n\nFlight SQL · consulta\nSELECT version, site, changed_at\nFROM lake.inventory.asset_changes\nWHERE id = 'LT-0042'\nORDER BY version\n\nDoris  →  catálogo de Iceberg: asset_changes v38  →  lee los Parquet de RustFS\n\nversion   site       changed_at\n6         Alicante   2026-10-02 09:41\n7         Madrid     2026-11-25 10:14\n\n← [{\"version\":6,\"site\":\"Alicante\"},{\"version\":7,\"site\":\"Madrid\"}]"},{"title":"Resumen","text":"Un cambio en datacore viaja como aviso, el adapter lo completa por gRPC, Flink lo filtra y lo escribe en Doris por lotes y en Iceberg para el histórico, y la web lo ve en segundos a través del explorer. Cada problema tiene su red: la caché ahorra llamadas, el estado de Flink y la columna de secuencia frenan versiones viejas, las etiquetas de Stream Load y los commits en checkpoint evitan duplicados, y las colas de fallos guardan lo roto.","code":""}]}},"ui":{"en":{"meta_desc":"A local, end-to-end replica of a modern asset-discovery data pipeline: Go, Kafka, Flink, Doris and Iceberg on RustFS, with a Rust API and a React app.","nav_map":"How it works","nav_run":"Run it","nav_built":"How it was built","nav_github":"GitHub","lang_label":"Language","theme_label":"Theme","theme_light":"Light","theme_dark":"Dark","hero_eyebrow":"Learning project · open source","hero_tagline":"A local, end-to-end replica of a modern asset-discovery data pipeline.","hero_lede":"When a device changes in the inventory, the change travels through \u003cb>Kafka\u003c/b>, a \u003cb>Go\u003c/b> adapter completes it over gRPC, and \u003cb>Flink\u003c/b> drops what is repeated or stale. It lands in \u003cb>Doris\u003c/b>, which holds the current state, and in \u003cb>Iceberg\u003c/b> on RustFS, which holds the history. A \u003cb>Rust\u003c/b> API serves it to a React app within seconds.","cta_github":"View on GitHub","cta_changelog":"Changelog","cta_map":"Explore the map","fig1_n":"12","fig1_l":"components on the map","fig2_n":"38","fig2_l":"executable acceptance cases","fig3_n":"11.5 GiB","fig3_l":"memory cap for the whole stack","fig4_n":"make up","fig4_l":"to start everything","stack_h2":"What it is made of","stack_p":"Everything runs in Docker Compose on a single laptop.","map_h2":"How a change travels","map_p":"The laptop LT-0042 moves from the Alicante site to the Madrid one. Press Next to follow that change and see how the data is transformed at each step, or tap a component to see what it is and what it does.","map_hint":"Swipe the diagram sideways to see it whole.","map_cap":"Tap a component, or the Stream Load and Arrow Flight SQL labels, to open its card.","map_aria":"Lab diagram: datacore publishes change notices to Kafka, the adapter completes them over gRPC with a Dragonfly cache and publishes them by type, Flink cleans them and writes them to Doris with Stream Load and to Iceberg on RustFS, and the Rust explorer queries Doris over Arrow Flight SQL for the web. Each component opens its card.","node_aria":": see what it is and what it does","edge_aria":": see what it is","controls_aria":"Journey controls","prev":"Previous","next":"Next","replay":"Replay step","play":"Play all","pause":"Pause","progress":"Step {n} of {m}","code_label":"The data at this step","pop_is":"What it is","pop_what":"What it does","pop_close":"Close the card","more_closed":"See LT-0042's full journey","more_open":"Close the journey","journey_title":"LT-0042, from Alicante to Madrid","journey_close":"Close","run_h2":"Run it locally","run_p":"You need Docker with about 12 GB of memory assigned to it.","run_after":"Then open \u003ccode>http://localhost:3000\u003c/code> to see the web app. \u003ccode>make acceptance\u003c/code> runs the 38 acceptance cases against the running stack.","copy":"Copy","copied":"Copied","built_h2":"How it was built","built_p":"Built spec-first with an AI coding agent: a written specification of about two thousand lines, 38 acceptance cases written and locked before any service code, and an audit after each of six sprints. The records are kept in the repository.","card1_t":"Specification","card1_d":"What to build, section by section, with the risks and the decisions taken.","card2_t":"Decision log","card2_d":"Every choice the build had to make on its own, with the reason.","card3_t":"Verification report","card3_d":"The specification requirement by requirement, with the evidence from a cold run.","card4_t":"Changelog","card4_d":"What is in each release.","footer":"MIT licensed · Source on GitHub"},"es":{"meta_desc":"Una réplica local, de punta a punta, de un pipeline moderno de descubrimiento de activos: Go, Kafka, Flink, Doris e Iceberg sobre RustFS, con una API en Rust y una web en React.","nav_map":"Cómo funciona","nav_run":"Ponerlo en marcha","nav_built":"Cómo se construyó","nav_github":"GitHub","lang_label":"Idioma","theme_label":"Tema","theme_light":"Claro","theme_dark":"Oscuro","hero_eyebrow":"Proyecto de aprendizaje · código abierto","hero_tagline":"Una réplica local, de punta a punta, de un pipeline moderno de descubrimiento de activos.","hero_lede":"Cuando cambia un equipo en el inventario, el aviso viaja por \u003cb>Kafka\u003c/b>, un adapter en \u003cb>Go\u003c/b> lo completa por gRPC y \u003cb>Flink\u003c/b> descarta lo repetido y lo viejo. Después lo escribe en \u003cb>Doris\u003c/b>, que guarda el estado actual, y en \u003cb>Iceberg\u003c/b> sobre RustFS, que guarda el histórico. Una API en \u003cb>Rust\u003c/b> se lo sirve a una web en React en segundos.","cta_github":"Ver en GitHub","cta_changelog":"Changelog","cta_map":"Explorar el mapa","fig1_n":"12","fig1_l":"piezas en el mapa","fig2_n":"38","fig2_l":"casos de aceptación ejecutables","fig3_n":"11,5 GiB","fig3_l":"de memoria para toda la pila","fig4_n":"make up","fig4_l":"para arrancarlo todo","stack_h2":"De qué está hecho","stack_p":"Todo corre en Docker Compose en un solo portátil.","map_h2":"El recorrido de un cambio","map_p":"El portátil LT-0042 pasa de la sede de Alicante a la de Madrid. Pulsa Siguiente para seguir ese cambio y ver cómo se transforma el dato en cada paso, o toca una pieza para ver qué es y qué hace.","map_hint":"Desliza el diagrama hacia los lados para verlo entero.","map_cap":"Toca una pieza, o las etiquetas Stream Load y Arrow Flight SQL, para abrir su ficha.","map_aria":"Diagrama del lab: datacore publica avisos de cambio en Kafka, el adapter los completa por gRPC con caché en Dragonfly y los publica por tipo, Flink los limpia y los escribe en Doris con Stream Load y en Iceberg sobre RustFS, y el explorer en Rust consulta Doris por Arrow Flight SQL para la web. Cada pieza abre su ficha.","node_aria":": ver qué es y qué hace","edge_aria":": ver qué es","controls_aria":"Controles del recorrido","prev":"Anterior","next":"Siguiente","replay":"Repetir paso","play":"Reproducir todo","pause":"Pausar","progress":"Paso {n} de {m}","code_label":"El dato en este paso","pop_is":"Qué es","pop_what":"Qué hace","pop_close":"Cerrar la ficha","more_closed":"Ver el recorrido completo de LT-0042","more_open":"Cerrar el recorrido","journey_title":"LT-0042, de Alicante a Madrid","journey_close":"Cerrar","run_h2":"Ponerlo en marcha","run_p":"Necesitas Docker con unos 12 GB de memoria asignados.","run_after":"Después abre \u003ccode>http://localhost:3000\u003c/code> para ver la web. \u003ccode>make acceptance\u003c/code> ejecuta los 38 casos de aceptación contra la pila en marcha.","copy":"Copiar","copied":"Copiado","built_h2":"Cómo se construyó","built_p":"Se construyó empezando por la especificación y con un agente de código con IA: una especificación escrita de unas dos mil líneas, 38 casos de aceptación escritos y bloqueados antes de cualquier servicio, y una auditoría tras cada uno de los seis sprints. Los registros están en el repositorio.","card1_t":"Especificación","card1_d":"Qué construir, sección a sección, con los riesgos y las decisiones tomadas.","card2_t":"Registro de decisiones","card2_d":"Cada elección que el build tuvo que hacer por su cuenta, con su motivo.","card3_t":"Informe de verificación","card3_d":"La especificación requisito a requisito, con la evidencia de una ejecución en frío.","card4_t":"Changelog","card4_d":"Qué trae cada versión.","footer":"Licencia MIT · Código en GitHub"}}};
+  var NS = "http://www.w3.org/2000/svg";
+  var VBW = 1460, BH = 68;
+  var lang = "en";
+  try { var saved = localStorage.getItem("adl-lang"); if (saved === "es" || saved === "en") lang = saved; } catch (e) {}
+
+  var $ = function (id) { return document.getElementById(id); };
+  function ui() { return D.ui[lang]; }
+  function txt() { return D.text[lang]; }
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var svgEdges = $("edges"), svgNodes = $("nodes"), svgPk = $("packets");
+  var stage = $("stage"), pop = $("pop");
+  var edgeEls = {}, labelEls = {}, nodeEls = {}, nodeById = {}, subEls = {}, titleEls = {};
+  var pickEls = {}, anchors = {};
+  var openId = null, step = 0, playing = false, journeyOpen = false;
+  var STEPS = D.struct.steps;
+
+  function el(tag, attrs, text) {
+    var x = document.createElementNS(NS, tag);
+    for (var k in attrs) x.setAttribute(k, attrs[k]);
+    if (text != null) x.textContent = text;
+    return x;
+  }
+  function bindOpen(target, id) {
+    target.addEventListener("click", function (ev) { ev.stopPropagation(); togglePop(id); });
+    target.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); togglePop(id); }
+    });
+  }
+
+  /* Build the diagram once; texts are filled by applyLang() */
+  var edgeInfo = {};
+  D.struct.edges.forEach(function (e) {
+    var p = el("path", { d: e.d, "class": "edge c-" + e.cat, "marker-end": "url(#arrow)" });
+    svgEdges.appendChild(p); edgeEls[e.id] = p;
+    var attrs = { x: e.lx, y: e.ly, "class": "elabel" + (e.info ? " link" : ""), "text-anchor": e.anchor };
+    if (e.info) { attrs.tabindex = "0"; attrs.role = "button"; attrs["aria-haspopup"] = "dialog"; }
+    var t = el("text", attrs, "");
+    svgEdges.appendChild(t); labelEls[e.id] = t;
+    if (e.info) { edgeInfo[e.id] = e.info; pickEls[e.info] = t; anchors[e.info] = e.box; bindOpen(t, e.info); }
+  });
+  D.struct.nodes.forEach(function (n) {
+    nodeById[n.id] = n;
+    var g = el("g", { "class": "node c-" + n.cat, tabindex: "0", role: "button", "aria-haspopup": "dialog" });
+    g.appendChild(el("rect", { "class": "halo", x: n.x - n.w / 2, y: n.y - BH / 2, width: n.w, height: BH, rx: 13 }));
+    g.appendChild(el("rect", { "class": "box", x: n.x - n.w / 2, y: n.y - BH / 2, width: n.w, height: BH, rx: 13 }));
+    var ti = el("text", { "class": "ntitle", x: n.x, y: n.y - 3, "text-anchor": "middle" }, "");
+    var su = el("text", { "class": "nsub", x: n.x, y: n.y + 18, "text-anchor": "middle" }, "");
+    g.appendChild(ti); g.appendChild(su);
+    bindOpen(g, n.id);
+    svgNodes.appendChild(g); nodeEls[n.id] = g; titleEls[n.id] = ti; subEls[n.id] = su;
+    pickEls[n.id] = g;
+    anchors[n.id] = { x: n.x, y: n.y, w: n.w, cat: n.cat };
+  });
+
+  /* Language and theme */
+  function applyStatic() {
+    var u = ui();
+    document.documentElement.lang = lang;
+    var nodes = document.querySelectorAll("[data-i18n]");
+    for (var i = 0; i < nodes.length; i++) { var k = nodes[i].getAttribute("data-i18n"); if (u[k] != null) nodes[i].textContent = u[k]; }
+    var hs = document.querySelectorAll("[data-i18n-html]");
+    for (var j = 0; j < hs.length; j++) { var k2 = hs[j].getAttribute("data-i18n-html"); if (u[k2] != null) hs[j].innerHTML = u[k2]; }
+    var as = document.querySelectorAll("[data-i18n-aria]");
+    for (var m = 0; m < as.length; m++) { var k3 = as[m].getAttribute("data-i18n-aria"); if (u[k3] != null) as[m].setAttribute("aria-label", u[k3]); }
+    var md = document.querySelector('meta[name="description"]'); if (md) md.setAttribute("content", u.meta_desc);
+    $("map").setAttribute("aria-label", u.map_aria);
+    $("controls").setAttribute("aria-label", u.controls_aria);
+    $("popClose").setAttribute("aria-label", u.pop_close);
+    $("popIsLabel").textContent = u.pop_is;
+    $("popWhatLabel").textContent = u.pop_what;
+    $("codeLabel").textContent = u.code_label;
+    $("journeyTitle").textContent = u.journey_title;
+    $("journeyClose").textContent = u.journey_close;
+    $("prev").textContent = u.prev; $("next").textContent = u.next; $("replay").textContent = u.replay;
+    $("play").textContent = playing ? u.pause : u.play;
+    $("moreLabel").textContent = journeyOpen ? u.more_open : u.more_closed;
+    $("copyBtn").textContent = u.copy;
+    $("langEn").setAttribute("aria-pressed", lang === "en" ? "true" : "false");
+    $("langEs").setAttribute("aria-pressed", lang === "es" ? "true" : "false");
+  }
+  function applyDiagramText() {
+    var u = ui(), T = txt();
+    D.struct.nodes.forEach(function (n) {
+      var info = T.info[n.id];
+      titleEls[n.id].textContent = info.title;
+      subEls[n.id].textContent = T.nodeSub[n.id];
+      nodeEls[n.id].setAttribute("aria-label", info.title + u.node_aria);
+    });
+    D.struct.edges.forEach(function (e) {
+      labelEls[e.id].textContent = T.edge[e.id];
+      if (e.info) labelEls[e.id].setAttribute("aria-label", T.edge[e.id] + u.edge_aria);
+    });
+  }
+  function buildJourney() {
+    var T = txt(), jl = $("jlist");
+    jl.textContent = "";
+    for (var i = 1; i < T.steps.length - 1; i++) {
+      var li = document.createElement("li");
+      var h = document.createElement("h3"); h.textContent = T.steps[i].title;
+      var p = document.createElement("p"); p.textContent = T.steps[i].text;
+      li.appendChild(h); li.appendChild(p); jl.appendChild(li);
+    }
+  }
+  function setLang(l) {
+    lang = l;
+    try { localStorage.setItem("adl-lang", l); } catch (e) {}
+    applyStatic(); applyDiagramText(); buildJourney(); renderStepText();
+    if (openId) refreshPop();
+  }
+  function setTheme(th) {
+    document.documentElement.setAttribute("data-theme", th);
+    try { localStorage.setItem("adl-theme", th); } catch (e) {}
+    syncTheme();
+  }
+  function syncTheme() {
+    var th = document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+    $("thLight").setAttribute("aria-pressed", th === "light" ? "true" : "false");
+    $("thDark").setAttribute("aria-pressed", th === "dark" ? "true" : "false");
+  }
+  $("langEn").addEventListener("click", function () { setLang("en"); });
+  $("langEs").addEventListener("click", function () { setLang("es"); });
+  $("thLight").addEventListener("click", function () { setTheme("light"); });
+  $("thDark").addEventListener("click", function () { setTheme("dark"); });
+
+  function setJourney(open) {
+    journeyOpen = open;
+    $("journey").hidden = !open;
+    $("moreBtn").setAttribute("aria-expanded", open ? "true" : "false");
+    $("moreLabel").textContent = open ? ui().more_open : ui().more_closed;
+  }
+  $("moreBtn").addEventListener("click", function () { setJourney($("journey").hidden); });
+  $("journeyClose").addEventListener("click", function () { setJourney(false); $("moreBtn").focus(); });
+
+  /* Copy button */
+  $("copyBtn").addEventListener("click", function () {
+    var text = $("cmdText").textContent, btn = $("copyBtn");
+    function done() { btn.textContent = ui().copied; setTimeout(function () { btn.textContent = ui().copy; }, 1600); }
+    function fallback() {
+      try {
+        var r = document.createRange(); r.selectNodeContents($("cmdText"));
+        var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      } catch (e) {}
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+    else fallback();
+  });
+
+  /* Card of each component */
+  function isSheet() { return window.innerWidth < 760; }
+  function fillParas(target, text) {
+    target.textContent = "";
+    text.split("\n\n").forEach(function (para) {
+      var p = document.createElement("p"); p.textContent = para; target.appendChild(p);
+    });
+  }
+  function positionPop(a) {
+    if (isSheet()) { pop.classList.add("sheet"); pop.style.left = ""; pop.style.top = ""; return; }
+    pop.classList.remove("sheet");
+    pop.style.left = "0px"; pop.style.top = "0px";
+    var W = stage.clientWidth, H = stage.clientHeight, s = W / VBW;
+    var pw = pop.offsetWidth, ph = pop.offsetHeight, gap = 12, pad = 8;
+    var toRight = (a.x + a.w / 2) * s + gap;
+    var toLeft = (a.x - a.w / 2) * s - gap - pw;
+    var x;
+    if (toRight + pw <= W - pad) x = toRight;
+    else if (toLeft >= pad) x = toLeft;
+    else x = Math.min(Math.max(a.x * s - pw / 2, pad), W - pw - pad);
+    var y = Math.min(Math.max(a.y * s - ph / 2, pad), Math.max(pad, H - ph - pad));
+    pop.style.left = x + "px"; pop.style.top = y + "px";
+  }
+  function refreshPop() {
+    var info = txt().info[openId];
+    $("popTitle").textContent = info.title;
+    $("popTech").textContent = info.tech;
+    fillParas($("popIs"), info.is);
+    fillParas($("popWhat"), info.what);
+    positionPop(anchors[openId]);
+  }
+  function openPop(id) {
+    var a = anchors[id];
+    stopPlay();
+    if (openId && pickEls[openId]) pickEls[openId].classList.remove("picked");
+    pop.style.setProperty("--cat", "var(--" + a.cat + ")");
+    pop.style.setProperty("--cat-soft", "var(--" + a.cat + "-soft)");
+    openId = id;
+    pop.hidden = false;
+    pop.scrollTop = 0;
+    refreshPop();
+    pickEls[id].classList.add("picked");
+    try { $("popClose").focus({ preventScroll: true }); } catch (err) { $("popClose").focus(); }
+  }
+  function closePop(refocus) {
+    if (!openId) return;
+    var id = openId;
+    openId = null;
+    pop.hidden = true;
+    pickEls[id].classList.remove("picked");
+    if (refocus) { try { pickEls[id].focus({ preventScroll: true }); } catch (err) {} }
+  }
+  function togglePop(id) { if (openId === id) closePop(true); else openPop(id); }
+  $("popClose").addEventListener("click", function () { closePop(true); });
+  pop.addEventListener("click", function (ev) { ev.stopPropagation(); });
+  document.addEventListener("click", function () { closePop(false); });
+  document.addEventListener("keydown", function (ev) { if (ev.key === "Escape") closePop(true); });
+  window.addEventListener("resize", function () { if (openId) positionPop(anchors[openId]); });
+
+  /* Animated journey */
+  function makePacket() {
+    var g = el("g", { "class": "packet" });
+    g.appendChild(el("circle", { r: 15, "class": "pk-glow", filter: "url(#glow)" }));
+    g.appendChild(el("circle", { r: 8, "class": "pk-core" }));
+    svgPk.appendChild(g);
+    return g;
+  }
+  function place(g, x, y) { g.setAttribute("transform", "translate(" + x.toFixed(1) + "," + y.toFixed(1) + ")"); }
+  function clearPackets() { while (svgPk.firstChild) svgPk.removeChild(svgPk.firstChild); }
+  function ease(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+
+  var runId = 0;
+  function moveAlong(m, dur, my) {
+    return new Promise(function (resolve) {
+      var path = edgeEls[m.e];
+      var L = path.getTotalLength();
+      var g = makePacket();
+      function at(f) {
+        var pt = path.getPointAtLength(m.rev ? L * (1 - f) : L * f);
+        place(g, pt.x, pt.y);
+      }
+      if (!dur) { at(1); resolve(); return; }
+      var t0 = null;
+      function frame(now) {
+        if (my !== runId) { resolve(); return; }
+        if (t0 === null) t0 = now;
+        var f = Math.min(1, (now - t0) / dur);
+        at(ease(f));
+        if (f < 1) requestAnimationFrame(frame); else resolve();
+      }
+      at(0);
+      requestAnimationFrame(frame);
+    });
+  }
+
+  function renderStepText() {
+    var s = txt().steps[step], u = ui();
+    $("stepTitle").textContent = s.title;
+    $("stepText").textContent = s.text;
+    var c = $("stepCode"), lbl = $("codeLabel");
+    if (s.code) { c.textContent = s.code; c.hidden = false; lbl.hidden = false; }
+    else { c.hidden = true; c.textContent = ""; lbl.hidden = true; }
+    $("progress").textContent = u.progress.replace("{n}", step).replace("{m}", STEPS.length - 1);
+  }
+  function paint(s) {
+    D.struct.nodes.forEach(function (n) {
+      var on = s.nodes.indexOf(n.id) !== -1;
+      nodeEls[n.id].classList.toggle("on", on && s.nodes.length < D.struct.nodes.length);
+      nodeEls[n.id].classList.toggle("dim", !on);
+    });
+    D.struct.edges.forEach(function (e) {
+      var on = s.edges.indexOf(e.id) !== -1;
+      edgeEls[e.id].classList.toggle("on", on && s.edges.length < D.struct.edges.length);
+      edgeEls[e.id].classList.toggle("dim", !on);
+      labelEls[e.id].classList.toggle("dim", !on);
+    });
+    renderStepText();
+    $("prev").disabled = step === 0;
+    $("next").disabled = step === STEPS.length - 1;
+  }
+  function run(animate) {
+    var my = ++runId;
+    var s = STEPS[step];
+    closePop(false);
+    paint(s);
+    clearPackets();
+    var dur = animate && !reduce ? 1000 : 0;
+    if (s.startAt) { var n = nodeById[s.startAt]; place(makePacket(), n.x, n.y - BH / 2); }
+    var chain = Promise.resolve();
+    s.phases.forEach(function (phase) {
+      chain = chain.then(function () {
+        if (my !== runId) return;
+        clearPackets();
+        return Promise.all(phase.map(function (m) { return moveAlong(m, dur, my); }));
+      });
+    });
+    return chain.then(function () { return my === runId; });
+  }
+  function go(n, animate) { step = Math.max(0, Math.min(STEPS.length - 1, n)); return run(animate); }
+  function stopPlay() { playing = false; $("play").textContent = ui().play; }
+
+  $("next").addEventListener("click", function () { stopPlay(); go(step + 1, true); });
+  $("prev").addEventListener("click", function () { stopPlay(); go(step - 1, false); });
+  $("replay").addEventListener("click", function () { stopPlay(); go(step, true); });
+  $("play").addEventListener("click", function () {
+    if (playing) { stopPlay(); return; }
+    playing = true; $("play").textContent = ui().pause;
+    var startAt = step >= STEPS.length - 1 ? 0 : step + 1;
+    (function loop(n) {
+      if (!playing || n > STEPS.length - 1) { stopPlay(); return; }
+      go(n, true).then(function (done) {
+        if (!done || !playing) return;
+        setTimeout(function () { if (playing) loop(n + 1); }, 1800);
+      });
+    })(startAt);
+  });
+
+  syncTheme();
+  applyStatic();
+  applyDiagramText();
+  buildJourney();
+  run(false);
+})();
+</script>
+</body>
+</html>
