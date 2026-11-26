@@ -220,3 +220,79 @@ func TestShutdownWithUnacknowledgedRecordsCommitsNothing(t *testing.T) {
 		t.Fatal("rebalances not allowed again when Run returned on shutdown (audit F-01)")
 	}
 }
+
+// flakyCommitClient serves one batch and fails the first `fails` commits
+// (every commit when fails < 0).
+type flakyCommitClient struct {
+	fakeClient
+	fails    int
+	attempts int
+}
+
+func (f *flakyCommitClient) CommitRecords(_ context.Context, rs ...*kgo.Record) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.attempts++
+	if f.fails < 0 || f.attempts <= f.fails {
+		return errors.New("REBALANCE_IN_PROGRESS")
+	}
+	f.committed = append(f.committed, rs...)
+	return nil
+}
+
+func ackedConsumer(client Client) *Consumer {
+	return &Consumer{Client: client, Log: quiet(), Grace: time.Second,
+		CommitTimeout: 500 * time.Millisecond, CommitRetryBase: 10 * time.Millisecond,
+		Handle: func(context.Context, *kgo.Record) Pending { a := newAck(); a.resolve(nil); return a }}
+}
+
+func TestFailedCommitIsRetried(t *testing.T) {
+	fetches, _ := batch(map[int32]int{0: 3})
+	client := &flakyCommitClient{fakeClient: fakeClient{batch: fetches}, fails: 2}
+	c := ackedConsumer(client)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		client.mu.Lock()
+		n := len(client.committed)
+		client.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the commit was not retried until it succeeded")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run = %v, want nil", err)
+	}
+	if client.attempts != 3 || client.committed[0].Offset != 2 {
+		t.Fatalf("attempts %d, committed %v; want 3 attempts committing offset 2", client.attempts, client.committed)
+	}
+}
+
+func TestCommitThatKeepsFailingStopsRun(t *testing.T) {
+	fetches, _ := batch(map[int32]int{0: 2})
+	client := &flakyCommitClient{fakeClient: fakeClient{batch: fetches}, fails: -1}
+	c := ackedConsumer(client)
+	done := make(chan error, 1)
+	go func() { done <- c.Run(context.Background()) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrCommit) {
+			t.Fatalf("Run = %v, want ErrCommit", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run kept polling with handled offsets it could not commit")
+	}
+	if client.attempts < 2 {
+		t.Fatalf("%d commit attempts, want retries before giving up", client.attempts)
+	}
+	if client.allowed < 1 {
+		t.Fatal("rebalances not allowed again when Run returned")
+	}
+}
