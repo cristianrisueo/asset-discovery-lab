@@ -136,3 +136,41 @@ func TestFlinkUnreachable(t *testing.T) {
 		t.Fatalf("expected a named connection error, got %v", err)
 	}
 }
+
+func TestFlinkSettledJobWaitsThroughTransientStates(t *testing.T) {
+	states := []string{"RESTARTING", "INITIALIZING", "RUNNING"}
+	calls := 0
+	f := flinkServer(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /jobs/overview": func(w http.ResponseWriter, r *http.Request) {
+			st := states[min(calls, len(states)-1)]
+			calls++
+			jsonReply(map[string]any{"jobs": []map[string]any{{"jid": "j1", "name": JobName, "state": st, "start-time": 1}}})(w, r)
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	j, err := f.SettledJob(ctx, JobName, 5*time.Millisecond)
+	if err != nil || j == nil || j.State != "RUNNING" || calls != 3 {
+		t.Fatalf("SettledJob = %+v, %v after %d calls; want RUNNING after 3", j, err, calls)
+	}
+}
+
+func TestFlinkSettledJobTimeoutAndTerminal(t *testing.T) {
+	state := "RESTARTING"
+	f := flinkServer(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /jobs/overview": func(w http.ResponseWriter, r *http.Request) {
+			jsonReply(map[string]any{"jobs": []map[string]any{{"jid": "j1", "name": JobName, "state": state, "start-time": 1}}})(w, r)
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	j, err := f.SettledJob(ctx, JobName, 5*time.Millisecond)
+	if err == nil || j == nil || j.State != "RESTARTING" {
+		t.Fatalf("SettledJob = %+v, %v; want the RESTARTING job and a timeout", j, err)
+	}
+	state = "FINISHED"
+	j, err = f.SettledJob(context.Background(), JobName, 5*time.Millisecond)
+	if err != nil || j == nil || j.State != "FINISHED" {
+		t.Fatalf("SettledJob = %+v, %v; want the FINISHED job at once", j, err)
+	}
+}

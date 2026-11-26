@@ -103,6 +103,31 @@ func (f *Flink) JobByName(ctx context.Context, name string) (*JobSummary, error)
 	return PickJob(jobs, name), nil
 }
 
+// SettledJob polls the job named name until it is absent, RUNNING or in a
+// state that is not active (for example FINISHED), and returns it. It waits
+// through transient states such as RESTARTING or INITIALIZING, so a graceful
+// stop right after a failover still takes its savepoint (spec §10.11). When
+// ctx ends first, it returns the last job seen and ctx's error.
+func (f *Flink) SettledJob(ctx context.Context, name string, interval time.Duration) (*JobSummary, error) {
+	if interval <= 0 {
+		interval = time.Second
+	}
+	for {
+		job, err := f.JobByName(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if job == nil || job.State == "RUNNING" || !ActiveJobStates[job.State] {
+			return job, nil
+		}
+		select {
+		case <-ctx.Done():
+			return job, ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+}
+
 // Vertex is a job vertex.
 type Vertex struct {
 	ID   string `json:"id"`

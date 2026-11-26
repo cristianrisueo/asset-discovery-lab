@@ -11,6 +11,10 @@ import (
 // SavepointDir is where graceful stops write savepoints (spec §10.11).
 const SavepointDir = "file:///flink-data/savepoints"
 
+// settleWait is how long stop-with-savepoint waits for a job in a transient
+// state (RESTARTING, INITIALIZING, ...) to become RUNNING before giving up.
+const settleWait = 90 * time.Second
+
 func (a *app) flink(ctx context.Context, args []string) error {
 	if len(args) == 0 || args[0] != "stop-with-savepoint" {
 		return usageErr("flink: expected stop-with-savepoint")
@@ -27,6 +31,20 @@ func (a *app) flink(ctx context.Context, args []string) error {
 	job, err := f.JobByName(ctx, labkit.JobName)
 	if err != nil {
 		return err
+	}
+	if job != nil && job.State != "RUNNING" && labkit.ActiveJobStates[job.State] {
+		// A job that is failing over cannot take a savepoint yet; wait for it,
+		// or the next start would restore from an older checkpoint.
+		_, _ = fmt.Fprintf(a.stdout, "flink: job %s is %s; waiting up to %s for RUNNING\n", labkit.JobName, job.State, min(settleWait, *timeout))
+		wctx, wcancel := context.WithTimeout(ctx, min(settleWait, *timeout))
+		settled, werr := f.SettledJob(wctx, labkit.JobName, time.Second)
+		wcancel()
+		if settled != nil {
+			job = settled
+		}
+		if werr != nil && ctx.Err() != nil {
+			return werr
+		}
 	}
 	if job == nil || job.State != "RUNNING" {
 		state := "absent"
