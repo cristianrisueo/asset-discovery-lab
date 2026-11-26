@@ -38,19 +38,20 @@ pub trait DorisQuery: Send + Sync {
 
 type Client = FlightServiceClient<Channel>;
 
-#[derive(Clone)]
-struct Session {
-    fe: Client,
-    token: String,
-}
-
 /// A Flight SQL connection to the Doris FE, created once and reused.
+///
+/// The channel and the bearer token are kept apart. A transport error or a
+/// timeout drops only the channels, which reconnect on the next request with
+/// the same token. Only `UNAUTHENTICATED` triggers a new handshake. That way
+/// a flaky network does not leave abandoned Flight SQL sessions in the FE
+/// (sprint D audit F-02).
 pub struct FlightSql {
     fe_addr: String,
     user: String,
     password: String,
     timeout: Duration,
-    session: Mutex<Option<Session>>,
+    fe: Mutex<Option<Client>>,
+    token: Mutex<Option<String>>,
     be_clients: Mutex<HashMap<String, Client>>,
 }
 
@@ -61,7 +62,8 @@ impl FlightSql {
             user: user.to_string(),
             password: password.to_string(),
             timeout,
-            session: Mutex::new(None),
+            fe: Mutex::new(None),
+            token: Mutex::new(None),
             be_clients: Mutex::new(HashMap::new()),
         })
     }
@@ -69,27 +71,24 @@ impl FlightSql {
     /// Opens the authenticated session now, so the first request does not pay
     /// for it. A failure is not fatal: the next query retries.
     pub async fn connect(&self) -> Result<(), DorisError> {
-        self.session().await.map(|_| ())
-    }
-
-    async fn session(&self) -> Result<Session, DorisError> {
-        let mut guard = self.session.lock().await;
-        if let Some(s) = guard.as_ref() {
-            return Ok(s.clone());
+        let r = tokio::time::timeout(self.timeout, async {
+            let fe = self.fe_client().await?;
+            self.token(&fe).await.map(|_| ())
+        })
+        .await
+        .unwrap_or(Err(DorisError::Timeout));
+        if matches!(r, Err(DorisError::Transport(_) | DorisError::Timeout)) {
+            self.drop_channels().await;
         }
-        let s = tokio::time::timeout(self.timeout, self.handshake())
-            .await
-            .map_err(|_| DorisError::Timeout)??;
-        *guard = Some(s.clone());
-        Ok(s)
+        r
     }
 
-    async fn reset(&self) {
-        *self.session.lock().await = None;
-        self.be_clients.lock().await.clear();
-    }
-
-    async fn handshake(&self) -> Result<Session, DorisError> {
+    /// The FE channel, connected on first use.
+    async fn fe_client(&self) -> Result<Client, DorisError> {
+        let mut guard = self.fe.lock().await;
+        if let Some(c) = guard.as_ref() {
+            return Ok(c.clone());
+        }
         let channel = Endpoint::from_shared(self.fe_addr.clone())
             .map_err(|e| DorisError::Transport(format!("DORIS_FLIGHT_ADDR: {e}")))?
             .connect_timeout(CONNECT_TIMEOUT)
@@ -97,7 +96,34 @@ impl FlightSql {
             .connect()
             .await
             .map_err(|e| DorisError::Transport(format!("connect to {}: {e}", self.fe_addr)))?;
-        let mut fe = client(channel);
+        let c = client(channel);
+        *guard = Some(c.clone());
+        Ok(c)
+    }
+
+    /// The bearer token, from a handshake on first use or after a rejection.
+    async fn token(&self, fe: &Client) -> Result<String, DorisError> {
+        let mut guard = self.token.lock().await;
+        if let Some(t) = guard.as_ref() {
+            return Ok(t.clone());
+        }
+        let t = self.handshake(fe.clone()).await?;
+        *guard = Some(t.clone());
+        Ok(t)
+    }
+
+    /// Forgets the channels (FE and BE): they reconnect on the next request.
+    async fn drop_channels(&self) {
+        *self.fe.lock().await = None;
+        self.be_clients.lock().await.clear();
+    }
+
+    /// Forgets the token: the next request handshakes again.
+    async fn drop_token(&self) {
+        *self.token.lock().await = None;
+    }
+
+    async fn handshake(&self, mut fe: Client) -> Result<String, DorisError> {
         let mut req = tonic::Request::new(futures::stream::iter(vec![HandshakeRequest {
             protocol_version: 0,
             payload: Default::default(),
@@ -128,7 +154,7 @@ impl FlightSql {
             DorisError::Unauthenticated("the FE handshake returned no bearer token".into())
         })?;
         tracing::info!(fe = %self.fe_addr, user = %self.user, "Flight SQL handshake done");
-        Ok(Session { fe, token })
+        Ok(token)
     }
 
     async fn be_client(&self, uri: &str) -> Result<Client, DorisError> {
@@ -147,20 +173,25 @@ impl FlightSql {
         Ok(c)
     }
 
-    /// Runs one statement on the session: GetFlightInfo on the FE, then DoGet
-    /// on every endpoint.
-    async fn run(&self, s: &Session, sql: &str) -> Result<Vec<RecordBatch>, DorisError> {
+    /// Runs one statement: GetFlightInfo on the FE, then DoGet on every
+    /// endpoint.
+    async fn run(
+        &self,
+        fe: &Client,
+        token: &str,
+        sql: &str,
+    ) -> Result<Vec<RecordBatch>, DorisError> {
         let cmd = CommandStatementQuery {
             query: sql.to_string(),
             transaction_id: None,
         };
         let descriptor = FlightDescriptor::new_cmd(cmd.as_any().encode_to_vec());
-        let info =
-            s.fe.clone()
-                .get_flight_info(with_token(descriptor, &s.token)?)
-                .await
-                .map_err(|st| DorisError::from_status(&st))?
-                .into_inner();
+        let info = fe
+            .clone()
+            .get_flight_info(with_token(descriptor, token)?)
+            .await
+            .map_err(|st| DorisError::from_status(&st))?
+            .into_inner();
         let mut batches = Vec::new();
         for ep in info.endpoint {
             let ticket: Ticket = ep
@@ -169,11 +200,11 @@ impl FlightSql {
             let location = ep.location.first().map(|l| l.uri.as_str()).unwrap_or("");
             let mut target = match translate_location(location) {
                 Some(uri) => self.be_client(&uri).await?,
-                None => s.fe.clone(),
+                None => fe.clone(),
             };
             tracing::debug!(raw_location = location, "DoGet");
             let stream = target
-                .do_get(with_token(ticket, &s.token)?)
+                .do_get(with_token(ticket, token)?)
                 .await
                 .map_err(|st| DorisError::from_status(&st))?
                 .into_inner();
@@ -195,28 +226,27 @@ impl FlightSql {
         Ok(batches)
     }
 
+    async fn attempt(&self, sql: &str) -> Result<Vec<RecordBatch>, DorisError> {
+        let fe = self.fe_client().await?;
+        let token = self.token(&fe).await?;
+        self.run(&fe, &token, sql).await
+    }
+
     async fn query_once(&self, sql: &str) -> Result<Vec<RecordBatch>, DorisError> {
-        let s = self.session().await?;
-        match self.run(&s, sql).await {
-            Err(DorisError::Unauthenticated(m)) => {
-                tracing::info!(error = %m, "Flight SQL token rejected; handshaking again");
-                self.reset().await;
-                let s = self.session().await?;
-                let r = self.run(&s, sql).await;
-                if matches!(
-                    r,
-                    Err(DorisError::Transport(_) | DorisError::Unauthenticated(_))
-                ) {
-                    self.reset().await;
-                }
-                r
+        let mut r = self.attempt(sql).await;
+        if let Err(DorisError::Unauthenticated(m)) = &r {
+            // An expired token, or an FE that restarted: handshake once more.
+            tracing::info!(error = %m, "Flight SQL token rejected; handshaking again");
+            self.drop_token().await;
+            r = self.attempt(sql).await;
+            if matches!(r, Err(DorisError::Unauthenticated(_))) {
+                self.drop_token().await;
             }
-            Err(e @ DorisError::Transport(_)) => {
-                self.reset().await;
-                Err(e)
-            }
-            r => r,
         }
+        if matches!(r, Err(DorisError::Transport(_))) {
+            self.drop_channels().await;
+        }
+        r
     }
 }
 
@@ -226,8 +256,9 @@ impl DorisQuery for FlightSql {
             match tokio::time::timeout(self.timeout, self.query_once(sql)).await {
                 Ok(r) => r,
                 Err(_) => {
-                    // A half-finished stream may leave the channel in a bad state.
-                    self.reset().await;
+                    // A half-finished stream may leave the channel in a bad
+                    // state; the token stays valid.
+                    self.drop_channels().await;
                     Err(DorisError::Timeout)
                 }
             }

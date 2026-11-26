@@ -65,6 +65,11 @@ pub struct ListParams {
 
 pub const LIMIT_DEFAULT: u32 = 50;
 pub const LIMIT_MAX: u32 = 500;
+/// Largest accepted `offset`. §13.2 only says "≥ 0", but Doris 4.1.5 never
+/// finishes a query whose `LIMIT + OFFSET` overflows a BIGINT, and keeps a BE
+/// thread busy until restart (sprint D audit F-01, decision D-045). One
+/// billion is far above any real inventory and leaves room for the limit.
+pub const OFFSET_MAX: u64 = 1_000_000_000;
 pub const MINUTES_DEFAULT: u32 = 60;
 pub const MINUTES_MAX: u32 = 1440;
 
@@ -81,7 +86,7 @@ impl ListParams {
         };
         let offset = match q.get("offset") {
             None => 0,
-            Some(s) => int_in_range("offset", s, 0, i64::MAX as u64)?,
+            Some(s) => int_in_range("offset", s, 0, OFFSET_MAX)?,
         };
         Ok(ListParams {
             site,
@@ -247,11 +252,18 @@ mod tests {
             );
         }
         assert_eq!(
-            ListParams::parse(&q(&[("offset", "9223372036854775807")]))
+            ListParams::parse(&q(&[("offset", "1000000000")]))
                 .unwrap()
                 .offset,
-            i64::MAX as u64
+            OFFSET_MAX
         );
+        // Offsets near i64::MAX make Doris spin (audit F-01): rejected.
+        for bad in ["1000000001", "9223372036854775807", "9223372036854775295"] {
+            assert!(
+                ListParams::parse(&q(&[("offset", bad)])).is_err(),
+                "offset {bad} should be rejected"
+            );
+        }
     }
 
     #[test]

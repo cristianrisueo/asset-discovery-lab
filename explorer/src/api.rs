@@ -103,11 +103,18 @@ async fn log_request(req: Request, next: Next) -> Response {
     let start = Instant::now();
     let resp = next.run(req).await;
     let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let status = resp.status().as_u16();
+    let latency_ms = (latency_ms * 1000.0).round() / 1000.0;
+    if route == "/healthz" {
+        // The compose health check calls it every 5 s; keep it out of info.
+        tracing::debug!(route = %route, method = %method, status, latency_ms, "request");
+        return resp;
+    }
     tracing::info!(
         route = %route,
         method = %method,
-        status = resp.status().as_u16(),
-        latency_ms = (latency_ms * 1000.0).round() / 1000.0,
+        status,
+        latency_ms,
         "request"
     );
     resp
