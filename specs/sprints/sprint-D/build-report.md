@@ -77,3 +77,21 @@ No container was OOM-killed or restarted.
 - **Extra explorer debug logs:** the raw endpoint location and the first batch's schema at `debug` level, used as D-040 evidence.
 - **`serde_json` `preserve_order`:** JSON keys follow the §13.3 order. Not in the plan; it is cosmetic.
 - **No Go, Java or CI change** was needed, as the plan expected. No bug from an earlier sprint was found.
+
+## After the audit
+
+The audit (`audit-report.md`) found **no critical or major issue**. Its gate re-run was green. Four minor findings were fixed or partly fixed (D-045):
+- `offset` is capped at 10⁹: a Doris 4.1.5 BIGINT-overflow query never ends and pins a BE thread.
+- The Flight SQL token survives transport errors and timeouts, so Doris sessions no longer leak.
+- nginx uses relative redirects.
+- `/healthz` is logged at `debug`.
+
+Unknown query parameters stay ignored on purpose. The FE memory margin (F-04) is handed to sprint E.
+
+The full gate was then re-run from `make down && make build && make clean && make up`:
+- gates A 10/10, B 9/9 (B09 p95 10.26 s), C 5/5, D 8/8;
+- `make test lint` green;
+- sprint 0 checks green;
+- `make reconcile` PASS with the lake compared.
+
+The stack is left running in full mode.

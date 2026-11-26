@@ -10,8 +10,8 @@ External memory between build sessions (sprints plan §2). Read it right after t
 | A · Ingestion | **Done** (gate green, audited, committed) | `specs/sprints/sprint-A/` |
 | B · Processing | **Done** (gate green, audited, committed) | `specs/sprints/sprint-B/` |
 | C · Lake | **Done** (gate green, audited, committed) | `specs/sprints/sprint-C/` |
-| D · Serving | Next | — |
-| E · Failures and close | Pending | — |
+| D · Serving | **Done** (gate green, audited, committed) | `specs/sprints/sprint-D/` |
+| E · Failures and close | Next | — |
 
 ## What exists after sprint 0
 
@@ -86,6 +86,28 @@ External memory between build sessions (sprints plan §2). Read it right after t
 - **`doris-fe`:** has `MALLOC_ARENA_MAX=2` (D-038).
 - **Gates:** A is 10/10, B is 9/9 (B09 p95 about 10.2 s), C is 5/5 (C02 about 13–19 s).
 
+## What exists after sprint D
+
+- **Compose, profile `app`, adds:**
+  - `explorer` (`adl/explorer:0.1.0`, host port 8080, 192M, `explorer healthcheck`);
+  - `web` (`adl/web:0.1.0`, host port 3000 → 80, 64M, `wget` health check).
+
+  `explorer` depends on `doris-init` completed, and on `doris-init-lake` completed with `required: false`. Its `LAKE_ENABLED` is `${ICEBERG_ENABLED:-true}`. `web` depends on a healthy explorer. The long-running limits total exactly 11,456 MiB (§15.4).
+- **`make up`** (full stack) reaches ready in about 100 s from clean.
+- **`explorer/`** (Rust 1.100.0 toolchain; axum 0.8.9, tokio 1.54.1, arrow-flight 60.2.0, tonic 0.14.9):
+  - flat `src/`: `api`, `service`, `flight`, `convert`, `validate`, `sql`, `error`, `config`, `logging`, `health`, `main`;
+  - 24 unit tests.
+  - **R4: step 1 works (D-040).** Handshake with `doris-fe:8070`, `GetFlightInfo`, then `DoGet` against `grpc+tcp://172.30.0.3:8050`, translated to `http://`, with the bearer token. The token survives transport errors; only `UNAUTHENTICATED` triggers a new handshake (D-045).
+  - `/readyz` reports `doris_transport: flight-sql`.
+  - `offset` is capped at 10⁹, because of a Doris BIGINT-overflow hang (D-045).
+- **`web/`** (React 19.3, Vite 8.3, TypeScript 5.9, Vitest 5.1, ESLint 10, Prettier):
+  - asset page (LT-0042 prefilled, card refreshed every 5 s, history table) and stats page (OS × site matrix, change-rate bars);
+  - 7 tests.
+  - `web/nginx.conf`: proxies `/api/` to `explorer:8080` through Docker DNS (re-resolved), falls back to `index.html`, listens on IPv4 and IPv6, uses `absolute_redirect off`, and writes a JSON access log.
+- **`make test` and `make lint`** run Cargo in `adl/explorer-toolchain:0.1.0`, the `toolchain` stage of `explorer/Dockerfile`, and npm in `node:24.22.3-bookworm-slim`. They use cache volumes `adl-cargo-registry`, `adl-cargo-target`, `adl-web-node-modules` and `adl-npm-cache`. With warm caches, `make test lint` takes about 1.5 minutes with the stack up.
+- **Doris FE heap is 1024m**, not §11.2's 1280m (R9, D-044). `docker stats` after the gate: FE 1.43 GiB / 1.75 GiB, with no `max` events.
+- **Gates:** A 10/10, B 9/9 (B09 p95 about 10.2 s), C 5/5, D 8/8 (D03 lake history about 20 s).
+
 ## Key decisions (see `specs/decision-log.md`)
 
 - D-002: kadm v1.20.0, a separate module from franz-go v1.22.3.
@@ -108,27 +130,39 @@ External memory between build sessions (sprints plan §2). Read it right after t
 - D-036: the processor lake design. Iceberg names its writer and committer from the uid prefix; `IcebergAssetChanges` names the terminal sink.
 - D-037: R6. The Doris catalog uses `use_path_style`.
 - D-038: R9, preventive. FE malloc arenas capped.
+- D-039: sprint D pins (Rust 1.100.0, arrow-flight 60.2.0, Node 24.22.3, nginx 1.30.8-alpine, TypeScript 5.9.3 because the spec says 5.x).
+- D-040: R4. Flight SQL step 1 works, with evidence and the Arrow types Doris sends.
+- D-041 and D-042: explorer and web design details (error mapping, `lake_unavailable`, JSON logs, nginx).
+- D-043: Cargo and npm builder containers.
+- D-044: R9. FE heap lowered from 1280m to 1024m, with `docker stats` before and after.
+- D-045: sprint D audit fixes: `offset` cap, token kept across transport errors, nginx relative redirects, `/healthz` logged at debug.
 
-## Next: sprint D (Serving)
+## Next: sprint E (Failures and close)
 
-Plan §4, sprint D:
-- **explorer** (§13) in `explorer/`, following the Flight SQL ladder (R4); record which step worked.
-- **web** (§14) in `web/`.
-- Both go in profile `app`. `explorer` depends on `doris-init` completed and on `doris-init-lake` completed with `required: false`.
-- **Makefile:** replace the "not available until sprint D" stubs in `make test` and `make lint` with Cargo and npm in builder containers (§15.9).
-- **History endpoint:**
-  - reads `lake.inventory.asset_changes`;
-  - the explorer user already has `Select_priv` on catalog `lake`;
-  - lake timestamps come back as `timestamptz(6)` rather than `DATETIME(3)` (sprint C audit F-04), and must still render as RFC 3339 with milliseconds and `Z`.
-- **Run the heavy Cargo and npm builds with the stack down** (`make down`), then `make build && make clean && make up`.
+Plan §4, sprint E:
+- **Make gate E pass,** fixing earlier components where needed.
+- **Check `e2e.yml` end to end.**
+- **Write the README** (§17.2). Include:
+  - the R4 outcome (step 1, no deviation);
+  - the FE heap deviation (D-044) in the memory or troubleshooting section;
+  - the D-037 `use_path_style` note;
+  - `docker compose` commands for `explorer` and `web` need the profile flags. Use `make logs SERVICE=explorer`, or `docker compose --profile core --profile lake --profile app …`; without them, `stop` and `logs` fail with "no such service: doris-init" (audit F-08).
+- **Record the `docker stats` snapshot** in the decision log (§18 item 7).
+- **Walk the LT-0042 walkthrough** with `make move`, the Flink UI, Doris and the web (`http://localhost:3000`), and record it. Do not assume seed values (sprint A audit F-10).
+- **The audit is of the whole repository.**
 
 ## Known issues and notes
 
 - **E04:** the submitter pins no `jobId`, so the job resubmitted after `make down` and `make up-core` gets a new id and restores from the savepoint. This was checked by hand in sprint B.
-- **The Doris FE is the tightest container.** It is at 1.5 to 1.67 GB of its 1792 MiB limit after D-038, and its heap (1280m) is not fully touched yet. It has never been OOM-killed. Sprint D adds Flight SQL load: watch `docker stats` and `/sys/fs/cgroup/memory.events` in `doris-fe`. On exit 137, apply R9 in order and record it.
+- **The Doris FE is still the tightest container** (sprint D audit F-04).
+  - With the 1024m heap (D-044), `memory.peak` reached about 83–88% of 1792 MiB. A fully touched heap leaves a margin of about 130–170 MB.
+  - After the sprint E soak, record `memory.peak`, `memory.events` and the FE's `RestartCount`.
+  - If `max` events or an OOM kill appear, apply R9's next step within the FE budget: cap `-XX:MaxDirectMemorySize`, or reduce the code cache or thread stacks. Moving budget between services comes only after that.
 - **Switching between `make up-core` and `make up` needs `make clean`** (§15.2).
 - **The submitter passes the cluster's `parallelism.default` (2) explicitly** (D-034). Flink's REST run handler would otherwise use 1.
 - **The acceptance precheck** dials only the host ports of §15.8. Every service must publish exactly those ports.
 - **The generator changes LT-0042, U-0117 and G-03 too** (allowed by §5.4). The sprint E walkthrough and README must not assume the seed values; for example, pause the generator or say "from its current site" (sprint A audit F-10).
 - **The adapter exits on purpose** when a produce fails outside shutdown (`ErrIncomplete`), and compose restarts it. A restart loop in its logs points at Kafka, not at the adapter.
-- **Open questions:** Q-001 (interpretations of A05, B08, D04, E04) and Q-002 (how kadm is versioned). Sprints A, B and C raised no new ones.
+- **Open questions:** Q-001 (interpretations of A05, B08, D04, E04) and Q-002 (how kadm is versioned). Sprints A to D raised no new ones.
+- **Explorer under failures:** the explorer answers 503 `upstream_unavailable` while Doris is unreachable, and recovers on the next request. nginx re-resolves the explorer after a restart. A Doris BE restart was survived during the sprint D audit.
+- **Unknown query parameters are ignored by the explorer on purpose** (D-045).

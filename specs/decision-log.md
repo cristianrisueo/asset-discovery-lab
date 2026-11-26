@@ -588,3 +588,20 @@ Each case asserts what its row says. Where a row leaves something open, I chose 
 
   FE cgroup after: `memory.peak 1,568,346,112` (83% of the limit), `anon 1,498,374,144`, `memory.events max 0`, `oom_kill 0`. Heap RSS was 843 MB of 1,074 MB. A fully touched heap plus native memory now comes to about 1.71 GB, leaving about 170 MB of margin.
 - **Diagram:** no change. **Spec deviation:** §11.2's FE heap value only; recorded here and in the sprint D build report.
+
+### D-045 · 2026-11-25 · G1 / §13.5 / §13.6 · Sprint D audit fixes
+- **Prompted by:** the sprint D audit (`specs/sprints/sprint-D/audit-report.md`), findings F-01, F-02, F-03 and F-07, all minor.
+- **Decisions:**
+  - **F-01, `offset` is bounded at 1,000,000,000** (`validate::OFFSET_MAX`); a larger value returns 400 `invalid_argument`.
+    - §13.2 only says "≥ 0". However, Doris 4.1.5 never finishes a query whose `LIMIT + OFFSET` overflows a BIGINT, and one BE thread keeps spinning at 100% CPU until the BE restarts. The auditor reproduced this over MySQL too, so it is a Doris bug.
+    - The bound keeps the explorer "the only way into the data" (§13.1) without letting one request take a CPU from Flink and Doris. It is far above any real inventory.
+    - Unit tests cover the bound and offsets near `i64::MAX`.
+  - **F-02, the token survives transport errors and timeouts.** The explorer keeps the FE channel and the bearer token apart.
+    - On a transport error or a timeout it drops only the channels, which reconnect on the next request, as §13.6 says. It keeps the token.
+    - Only `UNAUTHENTICATED` triggers a new handshake: an expired token, or an FE that restarted. The handshake is retried once.
+    - Before this, every reset opened a new Doris session and left the old one idle for up to 8 h, which counts toward `max_user_connections`.
+  - **F-03:** `web/nginx.conf` sets `absolute_redirect off`, so `/api` redirects to `/api/` on the same host port (3000).
+    - Unknown query parameters stay **ignored on purpose**. §13.5's "anything else returns 400" is read as invalid values of the documented parameters, and ignoring extra parameters (for example cache busters) is the common HTTP convention. No test depends on it.
+  - **F-07:** `/healthz` requests are logged at `debug`, not `info`. The compose health check calls it every 5 s, and every other route still logs at `info`.
+- **Not changed:** F-04 (FE memory margin) is watched in sprint E, with R9's next steps listed in D-044. F-05, F-06, F-08 and F-09 are informational.
+- **Diagram:** no change.
