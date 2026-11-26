@@ -605,3 +605,77 @@ Each case asserts what its row says. Where a row leaves something open, I chose 
   - **F-07:** `/healthz` requests are logged at `debug`, not `info`. The compose health check calls it every 5 s, and every other route still logs at `info`.
 - **Not changed:** F-04 (FE memory margin) is watched in sprint E, with R9's next steps listed in D-044. F-05, F-06, F-08 and F-09 are informational.
 - **Diagram:** no change.
+
+## Sprint E
+
+### D-046 · 2026-11-26 · G3 · "Latest at build" pin for sprint E
+- **actionlint v1.7.12**, run through `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12`. It checks `ci.yml` and `e2e.yml` (plan §4 sprint E, "check `e2e.yml` end to end"). It is the newest tag in `rhysd/actionlint` on 2026-11-26.
+  - It is a one-off check and is not a Makefile target, because §15.9 lists none.
+  - Both workflows lint clean. The `shellcheck` and `pyflakes` rules are skipped, because those tools are not installed on the host.
+- **Every pinned action tag exists upstream,** checked with `git ls-remote --tags`:
+  - `actions/checkout@v7.0.1`, `actions/setup-go@v7.1.0`, `actions/upload-artifact@v7.0.2`, `actions/setup-java@v6.3.0`, `actions/setup-node@v7.1.0`;
+  - `golangci/golangci-lint-action@v9.3.0`;
+  - `docker/setup-buildx-action@v4.4.1`, `docker/build-push-action@v7.4.0`.
+
+### D-047 · 2026-11-26 · §9.5 / §9.2 / G1 · Adapter: a failed offset commit is retried, then the adapter restarts
+- **What was wrong:** after a fully acknowledged batch, a failed `CommitRecords` was only logged (`adapter/internal/consumer/consumer.go`).
+  - When no later batch arrives, for example with the generator paused as in E02, the handled offsets would stay uncommitted.
+  - `adl-adapter` would then show lag forever, and a later restart would replay them.
+- **Decision:**
+  - The commit is retried with backoff (100 ms, doubling up to 1 s, at most 10 s per attempt) for up to `CommitTimeout` (30 s).
+  - Rebalances stay blocked meanwhile (`BlockRebalanceOnPoll`), so the partitions cannot move to another member while their offsets are pending.
+  - If the commit still fails, `Run` returns `ErrCommit` and the process exits. Compose restarts it from the last committed offset, the same path as `ErrIncomplete` (D-022). The duplicates are harmless (§9.5).
+  - On shutdown, the retries stop with the grace period.
+  - Rejected alternative: committing the pending offsets on a later poll. After a rebalance, the classic group protocol would accept a commit for a partition this member no longer owns, which could move another member's offset backwards.
+- **Tests:** `TestFailedCommitIsRetried` and `TestCommitThatKeepsFailingStopsRun`.
+- **Diagram:** no change.
+
+### D-048 · 2026-11-26 · §10.11 / G1 · `stop-with-savepoint` waits for a job that is failing over
+- **What was wrong:** `adlctl flink stop-with-savepoint`, and so `make down`, printed "nothing to stop" for a job in RESTARTING, INITIALIZING or another transient state, and took no savepoint.
+  - The next `make up` would restore from an older retained checkpoint.
+  - E04 would fail with "did not restore from a savepoint" if `make down` ran right after a failover, for example after E03.
+- **Decision:**
+  - New `labkit.(*Flink).SettledJob`: it polls until the job is absent, RUNNING or terminal.
+  - `stop-with-savepoint` waits for it for up to 90 s (or `--timeout`, if shorter), then stops a RUNNING job as §10.11 says.
+  - A job that never becomes RUNNING is still reported and skipped, and `make down` still stops the containers.
+- **Tests:** `TestFlinkSettledJobWaitsThroughTransientStates` and `TestFlinkSettledJobTimeoutAndTerminal`.
+- **Diagram:** no change.
+
+### D-049 · 2026-11-26 · §4.3 / §9.8 · Adapter log level from compose, with partition and offset in publish logs
+- **Why:** §4.3 step 2 makes "the trigger received, with its partition and offset" observable in the adapter logs. The adapter logged publishes only at `debug`, without coordinates, and compose did not pass `LOG_LEVEL`.
+- **Decision:**
+  - The `debug` lines `published` and `published from cache` now carry `partition` and `offset`.
+  - Compose sets `LOG_LEVEL: ${ADAPTER_LOG_LEVEL:-info}`, so `ADAPTER_LOG_LEVEL=debug make up` shows one line per entity, as the README walkthrough uses.
+  - The default stays `info` (§9.7), so a normal run logs only dead letters and retry escalations (§9.8).
+- **Diagram:** no change.
+
+### D-050 · 2026-11-26 · §18 item 7 / §15.4 / §3 R9 · `docker stats` snapshot of the full stack at default load
+- **When:** 2026-11-26T01:02:37Z. The full sprint E gate had just turned green: `make build && make clean && make up`, `make test lint`, `make acceptance` (38/38), then chaos for 180 s and `make reconcile`.
+- **Load:** the stack then ran 5 more minutes at the default load: generator at 10/s, chaos off, every service up.
+- **Snapshot** (`docker stats --no-stream`):
+
+  | Container | Usage / limit | % of limit |
+  |---|---|---|
+  | doris-fe | 1.388 GiB / 1.75 GiB | 79.3% |
+  | doris-be | 1.307 GiB / 3.25 GiB | 40.2% |
+  | flink-taskmanager | 1.359 GiB / 2 GiB | 68.0% |
+  | flink-jobmanager | 723.8 MiB / 1.25 GiB | 56.6% |
+  | kafka | 597.5 MiB / 1 GiB | 58.4% |
+  | iceberg-rest | 169.2 MiB / 512 MiB | 33.0% |
+  | rustfs | 64.0 MiB / 384 MiB | 16.7% |
+  | dragonfly | 43.0 MiB / 512 MiB | 8.4% |
+  | datacore | 15.5 MiB / 160 MiB | 9.7% |
+  | adapter | 9.0 MiB / 160 MiB | 5.6% |
+  | explorer | 1.9 MiB / 192 MiB | 1.0% |
+  | web | 3.0 MiB / 64 MiB | 4.7% |
+  | **Total** | **about 5,778 MiB (5.64 GiB) / 11,456 MiB** | 50.4% |
+
+- **Result:**
+  - No container exceeds its §15.4 limit.
+  - The sum of the limits is 11,456 MiB, the §15.4 budget, below 11.5 GiB.
+  - Every long-running container has `RestartCount=0` and `OOMKilled=false`.
+- **Doris FE (sprint D audit F-04, R9 watch):**
+  - **At the snapshot:** cgroup `memory.peak` 1,586,020,352 of `memory.max` 1,879,048,192 (84.4%), with `memory.events` `max 0`, `oom 0` and `oom_kill 0`.
+  - **During the gate, sampled every 30 s:** the highest peak was 1,644,564,480 (87.5%), in the exploratory gate E run before E04. After E04 restarts the FE, the highest was 1,610,964,992 (85.7%). There were no `max` events and no OOM kill.
+  - **Decision:** no further R9 step is needed. The FE heap stays at 1024m (D-044), and the conditional step of the sprint E plan (capping direct memory, the code cache and thread stacks) was not applied.
+- **Diagram:** no change.
