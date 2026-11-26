@@ -4,7 +4,7 @@
 .github
 .env
 logs
-specs
+development
 acceptance
 processor
 explorer

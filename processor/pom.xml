@@ -2,7 +2,7 @@
 <!--
   processor: the adl-processor Flink job (spec §10). Java 17, Flink 2.1 DataStream API.
   Every version is pinned (spec §2.1); "latest at build" choices are recorded in
-  specs/decision-log.md.
+  development/decision-log.md.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"

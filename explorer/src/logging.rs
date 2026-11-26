@@ -1,5 +1,5 @@
 //! Structured JSON logs through `tracing`, with `service=explorer` on every
-//! line, including the events of tonic and hyper (spec §13.8, CLAUDE.md).
+//! line, including the events of tonic and hyper (spec §13.8, development/CLAUDE.build.md).
 
 use std::fmt;
 
