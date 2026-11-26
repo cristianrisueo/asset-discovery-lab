@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Build-phase artifacts (specs, build runner, build-phase CLAUDE.md) moved to development/
 
+### Fixed
+
+- The processor's Maven builds retry HTTP 429 and 503 responses from Maven Central 10 times, 10 s apart, instead of the resolver's default of 3 times, 5 s apart. This applies to the `flink-job` image, the CI `java` job, `make test` and `make lint`. The CI image build of `flink-job` had failed on a Maven Central rate limit.
+
 ## [0.1.0] - 2026-11-26
 
 The base of the lab. An AI agent built it unattended from the system specification, in six sprints: 0 and A to E.

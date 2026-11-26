@@ -4,6 +4,10 @@
 
 FROM maven:3.9.16-eclipse-temurin-17 AS build
 WORKDIR /workspace
+# .mvn/maven.config widens Maven's retry window for HTTP 429/503 from Maven
+# Central (10 retries, 10 s apart), so a rate-limited CI runner waits instead
+# of failing the build.
+COPY .mvn ./.mvn
 COPY pom.xml .
 COPY src ./src
 # Unit tests run in `make test`; the image build only packages the jar.
