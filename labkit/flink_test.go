@@ -174,3 +174,46 @@ func TestFlinkSettledJobTimeoutAndTerminal(t *testing.T) {
 		t.Fatalf("SettledJob = %+v, %v; want the FINISHED job at once", j, err)
 	}
 }
+
+func TestJobSummaryReady(t *testing.T) {
+	cases := []struct {
+		name  string
+		state string
+		tasks JobTasks
+		want  bool
+	}{
+		{"every task running", "RUNNING", JobTasks{Total: 7, Running: 7}, true},
+		{"tasks still starting after a failover", "RUNNING", JobTasks{Total: 7, Running: 2}, false},
+		{"no task running yet", "RUNNING", JobTasks{Total: 7}, false},
+		{"running plus finished", "RUNNING", JobTasks{Total: 7, Running: 5, Finished: 2}, true},
+		{"no task counts", "RUNNING", JobTasks{}, true},
+		{"restarting", "RESTARTING", JobTasks{Total: 7, Running: 7}, false},
+	}
+	for _, c := range cases {
+		j := JobSummary{State: c.state, Tasks: c.tasks}
+		if got := j.Ready(); got != c.want {
+			t.Errorf("%s: Ready() = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// After a failover Flink reports the job RUNNING before its tasks run; a
+// savepoint triggered then fails, so SettledJob waits for every task.
+func TestFlinkSettledJobWaitsForEveryTask(t *testing.T) {
+	running := []int{0, 4, 7}
+	calls := 0
+	f := flinkServer(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /jobs/overview": func(w http.ResponseWriter, r *http.Request) {
+			n := running[min(calls, len(running)-1)]
+			calls++
+			jsonReply(map[string]any{"jobs": []map[string]any{{"jid": "j1", "name": JobName, "state": "RUNNING", "start-time": 1,
+				"tasks": map[string]int{"total": 7, "running": n, "initializing": 7 - n}}}})(w, r)
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	j, err := f.SettledJob(ctx, JobName, 5*time.Millisecond)
+	if err != nil || j == nil || !j.Ready() || j.Tasks.Running != 7 || calls != 3 {
+		t.Fatalf("SettledJob = %+v, %v after %d calls; want 7 of 7 tasks running after 3", j, err, calls)
+	}
+}

@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - The processor's Maven builds retry HTTP 429 and 503 responses from Maven Central 10 times, 10 s apart, instead of the resolver's default of 3 times, 5 s apart. This applies to the `flink-job` image, the CI `java` job, `make test` and `make lint`. The CI image build of `flink-job` had failed on a Maven Central rate limit.
+- `make down` right after a Flink failover now takes its savepoint:
+  - `adlctl flink stop-with-savepoint` waits until every task of the job runs, not only until Flink reports the job as RUNNING;
+  - it retries a rejected savepoint within its timeout while the same job is still active.
+
+  Before, a stop triggered while tasks were still starting was rejected ("Not all required tasks are currently running"), and the next `make up` restored from an older checkpoint. This failed E04 on the GitHub runner.
 
 ## [0.1.0] - 2026-11-26
 

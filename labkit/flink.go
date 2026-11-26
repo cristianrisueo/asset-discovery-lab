@@ -45,10 +45,33 @@ func (f *Flink) Ping(ctx context.Context) error { return f.get(ctx, "/overview",
 
 // JobSummary is an entry of GET /jobs/overview.
 type JobSummary struct {
-	ID        string `json:"jid"`
-	Name      string `json:"name"`
-	State     string `json:"state"`
-	StartTime int64  `json:"start-time"` // epoch milliseconds
+	ID        string   `json:"jid"`
+	Name      string   `json:"name"`
+	State     string   `json:"state"`
+	StartTime int64    `json:"start-time"` // epoch milliseconds
+	Tasks     JobTasks `json:"tasks"`
+}
+
+// JobTasks counts a job's tasks by state: the "tasks" object of an entry of
+// GET /jobs/overview.
+type JobTasks struct {
+	Total    int `json:"total"`
+	Running  int `json:"running"`
+	Finished int `json:"finished"`
+}
+
+// Ready reports whether the job can take a savepoint: it is RUNNING and every
+// task is running or already finished. Right after a failover Flink reports
+// the job as RUNNING while its tasks are still deploying or initializing, and
+// a savepoint triggered then fails ("Checkpoint triggering task … is not being
+// executed at the moment"). A summary without task counts counts as ready when
+// it is RUNNING.
+func (j JobSummary) Ready() bool {
+	if j.State != "RUNNING" {
+		return false
+	}
+	t := j.Tasks
+	return t.Total == 0 || (t.Running > 0 && t.Running+t.Finished == t.Total)
 }
 
 // Started returns the start time.
@@ -103,11 +126,12 @@ func (f *Flink) JobByName(ctx context.Context, name string) (*JobSummary, error)
 	return PickJob(jobs, name), nil
 }
 
-// SettledJob polls the job named name until it is absent, RUNNING or in a
-// state that is not active (for example FINISHED), and returns it. It waits
-// through transient states such as RESTARTING or INITIALIZING, so a graceful
-// stop right after a failover still takes its savepoint (spec §10.11). When
-// ctx ends first, it returns the last job seen and ctx's error.
+// SettledJob polls the job named name until it is absent, Ready (RUNNING with
+// every task running) or in a state that is not active (for example FINISHED),
+// and returns it. It waits through transient states such as RESTARTING or
+// INITIALIZING, and through a RUNNING job whose tasks are still starting, so a
+// graceful stop right after a failover still takes its savepoint (spec
+// §10.11). When ctx ends first, it returns the last job seen and ctx's error.
 func (f *Flink) SettledJob(ctx context.Context, name string, interval time.Duration) (*JobSummary, error) {
 	if interval <= 0 {
 		interval = time.Second
@@ -117,7 +141,7 @@ func (f *Flink) SettledJob(ctx context.Context, name string, interval time.Durat
 		if err != nil {
 			return nil, err
 		}
-		if job == nil || job.State == "RUNNING" || !ActiveJobStates[job.State] {
+		if job == nil || job.Ready() || !ActiveJobStates[job.State] {
 			return job, nil
 		}
 		select {

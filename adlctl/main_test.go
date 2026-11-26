@@ -3,10 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -189,5 +194,120 @@ func TestLakeCreated(t *testing.T) {
 		if got := lakeCreated(c.in); got != c.want {
 			t.Errorf("%s: lakeCreated = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// flinkConfig points ADL_FLINK at a fake Flink REST API and every other
+// endpoint at a closed port.
+func flinkConfig(t *testing.T, routes map[string]http.HandlerFunc) labkit.Config {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h, ok := routes[r.Method+" "+r.URL.Path]
+		if !ok {
+			http.Error(w, "no route", http.StatusNotFound)
+			return
+		}
+		h(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	down := downConfig(t)
+	down.Flink = srv.URL
+	return down
+}
+
+func replyJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func overview(running int) map[string]any {
+	return map[string]any{"jobs": []map[string]any{{"jid": "j1", "name": labkit.JobName, "state": "RUNNING", "start-time": 1,
+		"tasks": map[string]int{"total": 7, "running": running}}}}
+}
+
+// A RUNNING job whose tasks are still starting (right after a failover) is
+// waited for before the stop, so the savepoint is not rejected.
+func TestFlinkStopWaitsForEveryTask(t *testing.T) {
+	var polls, stops atomic.Int32
+	cfg := flinkConfig(t, map[string]http.HandlerFunc{
+		"GET /jobs/overview": func(w http.ResponseWriter, _ *http.Request) {
+			if polls.Add(1) < 3 {
+				replyJSON(w, overview(2))
+				return
+			}
+			replyJSON(w, overview(7))
+		},
+		"POST /jobs/j1/stop": func(w http.ResponseWriter, _ *http.Request) {
+			stops.Add(1)
+			w.WriteHeader(http.StatusAccepted)
+			replyJSON(w, map[string]string{"request-id": "r1"})
+		},
+		"GET /jobs/j1/savepoints/r1": func(w http.ResponseWriter, _ *http.Request) {
+			replyJSON(w, map[string]any{"status": map[string]string{"id": "COMPLETED"}, "operation": map[string]string{"location": "file:/flink-data/savepoints/savepoint-1"}})
+		},
+	})
+	code, out, errOut := runCmd(t, cfg, "flink", "stop-with-savepoint", "--timeout", "20s")
+	if code != 0 || !strings.Contains(out, "2 of 7 tasks running") || !strings.Contains(out, "savepoint written to file:/flink-data/savepoints/savepoint-1") {
+		t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+	if stops.Load() != 1 || polls.Load() < 3 {
+		t.Fatalf("stops=%d overview polls=%d; want one stop after every task runs", stops.Load(), polls.Load())
+	}
+}
+
+// A savepoint that fails while the job keeps running (a failover that starts
+// between the check and the trigger) is retried within the timeout.
+func TestFlinkStopRetriesAFailedSavepoint(t *testing.T) {
+	old := retryPause
+	retryPause = 10 * time.Millisecond
+	t.Cleanup(func() { retryPause = old })
+	var stops atomic.Int32
+	cfg := flinkConfig(t, map[string]http.HandlerFunc{
+		"GET /jobs/overview": func(w http.ResponseWriter, _ *http.Request) { replyJSON(w, overview(7)) },
+		"POST /jobs/j1/stop": func(w http.ResponseWriter, _ *http.Request) {
+			n := stops.Add(1)
+			w.WriteHeader(http.StatusAccepted)
+			replyJSON(w, map[string]string{"request-id": fmt.Sprintf("r%d", n)})
+		},
+		"GET /jobs/j1/savepoints/r1": func(w http.ResponseWriter, _ *http.Request) {
+			replyJSON(w, map[string]any{"status": map[string]string{"id": "COMPLETED"}, "operation": map[string]any{"failure-cause": map[string]string{
+				"class": "org.apache.flink.runtime.checkpoint.CheckpointException", "stack-trace": "Checkpoint triggering task VersionGate is not being executed at the moment"}}})
+		},
+		"GET /jobs/j1/savepoints/r2": func(w http.ResponseWriter, _ *http.Request) {
+			replyJSON(w, map[string]any{"status": map[string]string{"id": "COMPLETED"}, "operation": map[string]string{"location": "file:/flink-data/savepoints/savepoint-2"}})
+		},
+	})
+	code, out, errOut := runCmd(t, cfg, "flink", "stop-with-savepoint", "--timeout", "20s")
+	if code != 0 || stops.Load() != 2 || !strings.Contains(out, "savepoint attempt 1 failed") || !strings.Contains(out, "savepoint written to file:/flink-data/savepoints/savepoint-2") {
+		t.Fatalf("exit %d, stops %d\nstdout:\n%s\nstderr:\n%s", code, stops.Load(), out, errOut)
+	}
+}
+
+// When the job is gone after a failed savepoint, the failure is reported
+// instead of retried.
+func TestFlinkStopDoesNotRetryAGoneJob(t *testing.T) {
+	old := retryPause
+	retryPause = 10 * time.Millisecond
+	t.Cleanup(func() { retryPause = old })
+	var polls atomic.Int32
+	cfg := flinkConfig(t, map[string]http.HandlerFunc{
+		"GET /jobs/overview": func(w http.ResponseWriter, _ *http.Request) {
+			if polls.Add(1) == 1 {
+				replyJSON(w, overview(7))
+				return
+			}
+			replyJSON(w, map[string]any{"jobs": []map[string]any{{"jid": "j1", "name": labkit.JobName, "state": "FAILED", "start-time": 1}}})
+		},
+		"POST /jobs/j1/stop": func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusAccepted)
+			replyJSON(w, map[string]string{"request-id": "r1"})
+		},
+		"GET /jobs/j1/savepoints/r1": func(w http.ResponseWriter, _ *http.Request) {
+			replyJSON(w, map[string]any{"status": map[string]string{"id": "COMPLETED"}, "operation": map[string]any{"failure-cause": map[string]string{"class": "java.lang.Exception", "stack-trace": "boom"}}})
+		},
+	})
+	code, _, errOut := runCmd(t, cfg, "flink", "stop-with-savepoint", "--timeout", "20s")
+	if code != 1 || !strings.Contains(errOut, "savepoint failed") {
+		t.Fatalf("exit %d, stderr %q; want exit 1 with the savepoint failure", code, errOut)
 	}
 }
