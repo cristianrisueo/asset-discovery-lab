@@ -71,7 +71,8 @@ func (h *Handler) Handle(ctx context.Context, rec *kgo.Record) *publisher.Ack {
 		m := et.New()
 		if err := proto.Unmarshal(b, m); err == nil {
 			if v, err := contract.ValidateEntity(id, m); err == nil && v == version {
-				h.Log.Debug("published from cache", "key", key, "version", version, "outcome", "cache_hit", "attempt", 0)
+				h.Log.Debug("published from cache", "key", key, "version", version, "outcome", "cache_hit", "attempt", 0,
+					"partition", rec.Partition, "offset", rec.Offset)
 				return h.Publisher.Entity(et.TopicSuffix, id, b, version)
 			}
 		}
@@ -88,7 +89,7 @@ func (h *Handler) Handle(ctx context.Context, rec *kgo.Record) *publisher.Ack {
 		// Stored under the entity's own version, which can be newer (§9.3).
 		h.Cache.Set(ctx, cache.Key(et.Name, id, res.Version), b)
 		h.Log.Debug("published", "key", key, "version", version, "entity_version", res.Version,
-			"outcome", "success", "attempt", res.Attempts)
+			"outcome", "success", "attempt", res.Attempts, "partition", rec.Partition, "offset", rec.Offset)
 		return h.Publisher.Entity(et.TopicSuffix, id, b, version)
 	case fetcher.NotFound:
 		return h.deadLetter(src, key, version, publisher.ReasonNotFound, res.Detail, res.Attempts)

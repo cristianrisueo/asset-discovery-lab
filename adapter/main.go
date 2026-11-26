@@ -177,8 +177,9 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 	case <-ctx.Done():
 	case runErr = <-httpErr:
 	case runErr = <-done:
-		// A record failed outside shutdown: exit, so the restarted adapter
-		// handles it again from the last committed offset (spec §9.2).
+		// A record failed, or a handled batch could not be committed,
+		// outside shutdown: exit, so the restarted adapter handles it again
+		// from the last committed offset (spec §9.2, §9.5).
 		consumed = true
 	}
 	// SIGTERM (spec §9.8): stop polling, finish the current batch, commit

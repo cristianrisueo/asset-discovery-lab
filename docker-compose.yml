@@ -166,6 +166,9 @@ services:
       KAFKA_BROKERS: kafka:9092
       DATACORE_ADDR: datacore:50051
       DRAGONFLY_ADDR: dragonfly:6379
+      # debug logs one line per published entity, with its partition and offset
+      # (spec §4.3 step 2): ADAPTER_LOG_LEVEL=debug make up.
+      LOG_LEVEL: ${ADAPTER_LOG_LEVEL:-info}
     ports:
       - "8091:8091"
     healthcheck:
