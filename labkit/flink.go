@@ -136,14 +136,21 @@ func (f *Flink) SettledJob(ctx context.Context, name string, interval time.Durat
 	if interval <= 0 {
 		interval = time.Second
 	}
+	var last *JobSummary
 	for {
 		job, err := f.JobByName(ctx, name)
 		if err != nil {
+			// The deadline can end in the middle of a request, not only
+			// between two polls: keep the contract and return the last job.
+			if ctx.Err() != nil {
+				return last, ctx.Err()
+			}
 			return nil, err
 		}
 		if job == nil || job.Ready() || !ActiveJobStates[job.State] {
 			return job, nil
 		}
+		last = job
 		select {
 		case <-ctx.Done():
 			return job, ctx.Err()

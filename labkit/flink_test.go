@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -156,10 +157,13 @@ func TestFlinkSettledJobWaitsThroughTransientStates(t *testing.T) {
 }
 
 func TestFlinkSettledJobTimeoutAndTerminal(t *testing.T) {
-	state := "RESTARTING"
+	// Atomic: a request abandoned at the deadline can still be in its handler
+	// when the test switches the state.
+	var state atomic.Value
+	state.Store("RESTARTING")
 	f := flinkServer(t, map[string]func(http.ResponseWriter, *http.Request){
 		"GET /jobs/overview": func(w http.ResponseWriter, r *http.Request) {
-			jsonReply(map[string]any{"jobs": []map[string]any{{"jid": "j1", "name": JobName, "state": state, "start-time": 1}}})(w, r)
+			jsonReply(map[string]any{"jobs": []map[string]any{{"jid": "j1", "name": JobName, "state": state.Load().(string), "start-time": 1}}})(w, r)
 		},
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -168,7 +172,7 @@ func TestFlinkSettledJobTimeoutAndTerminal(t *testing.T) {
 	if err == nil || j == nil || j.State != "RESTARTING" {
 		t.Fatalf("SettledJob = %+v, %v; want the RESTARTING job and a timeout", j, err)
 	}
-	state = "FINISHED"
+	state.Store("FINISHED")
 	j, err = f.SettledJob(context.Background(), JobName, 5*time.Millisecond)
 	if err != nil || j == nil || j.State != "FINISHED" {
 		t.Fatalf("SettledJob = %+v, %v; want the FINISHED job at once", j, err)
@@ -215,5 +219,27 @@ func TestFlinkSettledJobWaitsForEveryTask(t *testing.T) {
 	j, err := f.SettledJob(ctx, JobName, 5*time.Millisecond)
 	if err != nil || j == nil || !j.Ready() || j.Tasks.Running != 7 || calls != 3 {
 		t.Fatalf("SettledJob = %+v, %v after %d calls; want 7 of 7 tasks running after 3", j, err, calls)
+	}
+}
+
+// When the deadline ends in the middle of a request (a slow runner), the last
+// job seen is still returned with ctx's error.
+func TestFlinkSettledJobKeepsTheLastJobWhenTheDeadlineHitsARequest(t *testing.T) {
+	calls := 0
+	f := flinkServer(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /jobs/overview": func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			if calls > 1 {
+				<-r.Context().Done() // hold the request until the client gives up
+				return
+			}
+			jsonReply(map[string]any{"jobs": []map[string]any{{"jid": "j1", "name": JobName, "state": "RESTARTING", "start-time": 1}}})(w, r)
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	j, err := f.SettledJob(ctx, JobName, time.Millisecond)
+	if err == nil || ctx.Err() == nil || j == nil || j.State != "RESTARTING" {
+		t.Fatalf("SettledJob = %+v, %v; want the RESTARTING job and the deadline error", j, err)
 	}
 }
